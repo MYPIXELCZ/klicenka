@@ -40,8 +40,12 @@ describe("login handler", () => {
     expect(res.status).toBe(401);
     expect(await res.text()).toContain("Podpis");
   });
+  it("status reports the identifier and environment it answers to", async () => {
+    expect(await statusResponse("cookie", { audience: "kozi-pelisek", environment: "production" }).json())
+      .toMatchObject({ adapter: "cookie", audience: "kozi-pelisek", environment: "production" });
+  });
   it("status reports version and adapter only", async () => {
-    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.2", protocol: 1, adapter: "cookie" });
+    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.3", protocol: 1, adapter: "cookie" });
   });
 });
 

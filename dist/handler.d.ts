@@ -34,8 +34,16 @@ export declare function readToken(request: Request): Promise<string | null>;
  * session. Adapters wrap it for Next.js App/Pages Router, Supabase, NextAuth.
  */
 export declare function createLoginHandler<User>(opts: LoginHandlerOptions<User>): (request: Request) => Promise<Response>;
-/** /klicenka/status — version and adapter, nothing sensitive. */
-export declare function statusResponse(adapter: string): Response;
+/**
+ * /klicenka/status — version, adapter, and the identifier + environment this
+ * deployment answers to (public anyway: they're the token's audience). The tracker
+ * reads them when a site is added, so nobody has to type them twice. Both default
+ * to KLICENKA_AUDIENCE / KLICENKA_ENVIRONMENT.
+ */
+export declare function statusResponse(adapter: string, site?: {
+    audience?: string;
+    environment?: string;
+}): Response;
 /** A 303 redirect that sets a session cookie — the usual end of startSession. */
 export declare function redirectWithCookie(location: string, cookie: {
     name: string;

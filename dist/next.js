@@ -9,9 +9,9 @@ import { createLoginHandler, statusResponse } from "./handler.js";
 export function klicenkaLogin(opts) {
     return createLoginHandler(opts);
 }
-export function klicenkaStatus(adapter) {
+export function klicenkaStatus(adapter, site) {
     return async function GET() {
-        return statusResponse(adapter);
+        return statusResponse(adapter, site);
     };
 }
 /**

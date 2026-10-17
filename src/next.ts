@@ -12,9 +12,9 @@ export function klicenkaLogin<User>(opts: LoginHandlerOptions<User>) {
   return createLoginHandler(opts);
 }
 
-export function klicenkaStatus(adapter: string) {
+export function klicenkaStatus(adapter: string, site?: { audience?: string; environment?: string }) {
   return async function GET() {
-    return statusResponse(adapter);
+    return statusResponse(adapter, site);
   };
 }
 

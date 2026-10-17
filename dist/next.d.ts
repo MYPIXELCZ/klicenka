@@ -8,7 +8,10 @@ import { type LoginHandlerOptions } from "./handler.js";
  *   export const GET = klicenkaStatus("cookie");
  */
 export declare function klicenkaLogin<User>(opts: LoginHandlerOptions<User>): (request: Request) => Promise<Response>;
-export declare function klicenkaStatus(adapter: string): () => Promise<Response>;
+export declare function klicenkaStatus(adapter: string, site?: {
+    audience?: string;
+    environment?: string;
+}): () => Promise<Response>;
 type PagesRequest = IncomingMessage & {
     body?: unknown;
 };

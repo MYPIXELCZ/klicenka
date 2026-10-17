@@ -53,9 +53,22 @@ export function createLoginHandler(opts) {
         return opts.startSession({ user, claims, maxAgeSeconds: Math.round(claims.sessionHours * 3600), request });
     };
 }
-/** /klicenka/status — version and adapter, nothing sensitive. */
-export function statusResponse(adapter) {
-    return new Response(JSON.stringify({ name: "klicenka", version: VERSION, protocol: PROTOCOL, adapter }), {
+/**
+ * /klicenka/status — version, adapter, and the identifier + environment this
+ * deployment answers to (public anyway: they're the token's audience). The tracker
+ * reads them when a site is added, so nobody has to type them twice. Both default
+ * to KLICENKA_AUDIENCE / KLICENKA_ENVIRONMENT.
+ */
+export function statusResponse(adapter, site = {}) {
+    const env = typeof process !== "undefined" ? process.env : {};
+    const audience = site.audience ?? env.KLICENKA_AUDIENCE;
+    const environment = site.environment ?? env.KLICENKA_ENVIRONMENT;
+    const body = {
+        name: "klicenka", version: VERSION, protocol: PROTOCOL, adapter,
+        ...(audience ? { audience } : {}),
+        ...(environment ? { environment } : {}),
+    };
+    return new Response(JSON.stringify(body), {
         headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" },
     });
 }

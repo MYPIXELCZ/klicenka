@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.0.2
+ * Version: 1.0.3
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.0.2');
+define('KLICENKA_PLUGIN_VERSION', '1.0.3');
 
 function klicenka_config()
 {
@@ -214,7 +214,15 @@ add_action('login_form_klicenka', function () {
 function klicenka_status()
 {
     nocache_headers();
-    wp_send_json(array('name' => 'klicenka', 'version' => KLICENKA_PLUGIN_VERSION, 'protocol' => 1, 'adapter' => 'wordpress'));
+    $cfg = klicenka_config();
+    $out = array('name' => 'klicenka', 'version' => KLICENKA_PLUGIN_VERSION, 'protocol' => 1, 'adapter' => 'wordpress');
+    // The identifier and environment are the token's audience — public, and the
+    // tracker reads them when the site is added.
+    if ($cfg['audience'] !== '') {
+        $out['audience'] = $cfg['audience'];
+        $out['environment'] = $cfg['environment'];
+    }
+    wp_send_json($out);
 }
 add_action('wp_ajax_nopriv_klicenka_status', 'klicenka_status');
 add_action('wp_ajax_klicenka_status', 'klicenka_status');

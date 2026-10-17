@@ -19,7 +19,7 @@ Rotace klíče v trackeru (nový `kid`) zneplatní všechny dříve vydané toke
 ## Instalace balíčku
 
 ```bash
-npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.2.tar.gz
+npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.3.tar.gz
 ```
 
 Balíček je veřejný a neobsahuje nic tajného. Instaluje se jako tarball konkrétní verze, takže lockfile má https adresu s kontrolním součtem. Na Vercelu nepotřebuje token ani git. Zápis `github:…` nepoužívejte, npm by do lockfilu uložil `git+ssh` a build bez SSH klíče by selhal.
@@ -182,9 +182,9 @@ Plugin potřebuje PHP s rozšířením sodium, standardně od PHP 7.2. Musí mí
 
 ## Přidání webu v trackeru
 
-1. Klíčenka → Přidat web. Vyplňte název, adresu, typ, **identifikátor**, prostředí, komu web patří a volitelně klienta nebo projekt.
-2. Přidejte účet: popisek, roli a účet na webu (`sub`).
-3. V detailu webu klikněte na „Ověřit“. Stav „Odpovídá“ znamená, že web vystavuje `/klicenka/status` se správnou verzí.
+1. Klíčenka → Přidat web. Zadejte adresu, komu web patří, volitelně klienta nebo projekt a účet na webu (`sub`, předvyplněný vaším e-mailem).
+2. Tracker se při uložení zeptá webu na stav a převezme z něj typ, identifikátor a prostředí. Web bez Klíčenky se uloží jako externí služba (odkaz a údaje z trezoru).
+3. V detailu webu jde stav kdykoli ověřit znovu („Ověřit“) a doplnit další účty, délku přihlášení nebo poznámku. Když web hlásí jiný identifikátor nebo prostředí, než má tracker uložené, ukáže to.
 4. Klikněte na „Přihlásit se“.
 
 ## Kontrola po nasazení
