@@ -11,7 +11,7 @@ Klíčenka přihlašuje z Project Trackeru do administrace webu jedním klikem. 
    - `sub` = účet na webu (e-mail nebo uživatelské jméno, jak je zadané v trackeru)
    - `act` = skutečný člověk (`sub`, `name`, `email` z trackeru)
    - `sh` = kolik hodin má platit session na webu (výchozí 8)
-4. Prohlížeč token odešle skrytým formulářem na `POST <web>/klicenka/login` (WordPress: `wp-login.php?action=klicenka`). Nikdy v URL.
+4. Prohlížeč token odešle skrytým formulářem na `POST <web>/klicenka/login` (WordPress: `wp-login.php?action=klicenka`). Nikdy v URL. Weby s verzí ≥ 1.1 dostanou místo formuláře obyčejný odkaz `GET <web>/klicenka/login?code=…` s jednorázovým kódem na 60 s (jen tak se web z nainstalované aplikace trackeru otevře v Safari); web si za kód vyzvedne token z trackeru (`POST /api/klicenka/handoff`) a dál ověřuje stejně. Route proto exportuje `POST` i `GET`.
 5. Web ověří podpis přes `https://tracker.mypixel.cz/.well-known/jwks.json`, vydavatele, adresáta, platnost a nepoužité `jti`. Pak přihlásí **přesně** účet ze `sub`, zapíše `act` do logu a přesměruje do administrace. Když účet neexistuje, přihlášení odmítne. Nikdy nepřihlásí „prvního admina“.
 
 Rotace klíče v trackeru (nový `kid`) zneplatní všechny dříve vydané tokeny najednou. Weby si JWKS samy obnoví.
@@ -19,7 +19,7 @@ Rotace klíče v trackeru (nový `kid`) zneplatní všechny dříve vydané toke
 ## Instalace balíčku
 
 ```bash
-npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.3.tar.gz
+npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.1.0.tar.gz
 ```
 
 Balíček je veřejný a neobsahuje nic tajného. Instaluje se jako tarball konkrétní verze, takže lockfile má https adresu s kontrolním součtem. Na Vercelu nepotřebuje token ani git. Zápis `github:…` nepoužívejte, npm by do lockfilu uložil `git+ssh` a build bez SSH klíče by selhal.
@@ -87,6 +87,7 @@ export const POST = klicenkaLogin({
     redirectWithCookie("/admin", { name: SESSION_COOKIE, value: await createSessionToken(user, maxAgeSeconds), maxAgeSeconds }),
   log: (e) => console.info("[klicenka]", JSON.stringify(e)), // nebo zápis do audit tabulky webu
 });
+export const GET = POST; // odkaz s jednorázovým kódem (z nainstalované aplikace trackeru do Safari)
 
 // app/klicenka/status/route.ts
 import { klicenkaStatus } from "@mypixel/klicenka/next";
@@ -161,6 +162,7 @@ Přijímací stránka předá token callbacku NextAuth formulářem POST s jeho 
 // App Router: app/klicenka/login/route.ts
 import { nextAuthReceiver } from "@mypixel/klicenka/next-auth";
 export const POST = nextAuthReceiver({ redirectTo: "/admin", issuer: process.env.KLICENKA_ISSUER });
+export const GET = POST;
 
 // Pages Router: pages/api/klicenka/login.ts + rewrite /klicenka → /api/klicenka (viz výše)
 export default toPagesHandler(nextAuthReceiver({ redirectTo: "/admin" }));

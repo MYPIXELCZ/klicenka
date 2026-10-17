@@ -1,6 +1,6 @@
 import { verifyKlicenkaToken, type KlicenkaClaims, type KlicenkaConfig } from "./verify.js";
 import { errorPage, esc, htmlPage } from "./pages.js";
-import { readToken } from "./handler.js";
+import { readToken, tokenFromRequest } from "./handler.js";
 
 /**
  * NextAuth v4 (App or Pages Router) and v5 (Auth.js). NextAuth creates sessions only
@@ -57,11 +57,21 @@ export function klicenkaProvider<User extends object>(Credentials: CredentialsFa
  * token to NextAuth's credentials callback with its CSRF token. `basePath` is
  * NextAuth's API path, `redirectTo` where to land.
  */
-export function nextAuthReceiver(opts: { basePath?: string; redirectTo?: string; issuer?: string; nonce?: () => string | undefined }) {
+export function nextAuthReceiver(opts: {
+  basePath?: string; redirectTo?: string; issuer?: string; nonce?: () => string | undefined;
+  /** For links with a one-time code; default KLICENKA_AUDIENCE / KLICENKA_ENVIRONMENT. */
+  audience?: string; environment?: string;
+}) {
   const base = (opts.basePath ?? "/api/auth").replace(/\/$/, "");
-  return async function POST(request: Request): Promise<Response> {
-    if (request.method !== "POST") return errorPage("Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.", opts.issuer, 405);
-    const token = await readToken(request);
+  // Export it as both POST (form) and GET (link with a one-time code).
+  return async function receive(request: Request): Promise<Response> {
+    const viaLink = request.method === "GET" && new URL(request.url).searchParams.has("code");
+    if (request.method !== "POST" && !viaLink) return errorPage("Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.", opts.issuer, 405);
+    const env = typeof process !== "undefined" ? process.env : {};
+    const issuer = opts.issuer ?? env.KLICENKA_ISSUER ?? "";
+    const token = viaLink
+      ? await tokenFromRequest(request, { issuer, audience: opts.audience ?? env.KLICENKA_AUDIENCE ?? "", environment: opts.environment ?? env.KLICENKA_ENVIRONMENT ?? "" })
+      : await readToken(request);
     if (!token || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
       return errorPage("Chybí přihlašovací token.", opts.issuer);
     }

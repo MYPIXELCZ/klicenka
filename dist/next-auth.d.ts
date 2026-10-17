@@ -42,6 +42,9 @@ export declare function nextAuthReceiver(opts: {
     redirectTo?: string;
     issuer?: string;
     nonce?: () => string | undefined;
+    /** For links with a one-time code; default KLICENKA_AUDIENCE / KLICENKA_ENVIRONMENT. */
+    audience?: string;
+    environment?: string;
 }): (request: Request) => Promise<Response>;
 /** jwt callback helper: keep the keyring's time limit on the token. */
 export declare function klicenkaJwt<T extends Record<string, unknown>>(token: T, user?: unknown): T;

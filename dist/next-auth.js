@@ -1,6 +1,6 @@
 import { verifyKlicenkaToken } from "./verify.js";
 import { errorPage, esc, htmlPage } from "./pages.js";
-import { readToken } from "./handler.js";
+import { readToken, tokenFromRequest } from "./handler.js";
 export function klicenkaProvider(Credentials, opts) {
     const log = opts.log ?? ((e) => console.info("[klicenka]", JSON.stringify(e)));
     return Credentials({
@@ -31,10 +31,16 @@ export function klicenkaProvider(Credentials, opts) {
  */
 export function nextAuthReceiver(opts) {
     const base = (opts.basePath ?? "/api/auth").replace(/\/$/, "");
-    return async function POST(request) {
-        if (request.method !== "POST")
+    // Export it as both POST (form) and GET (link with a one-time code).
+    return async function receive(request) {
+        const viaLink = request.method === "GET" && new URL(request.url).searchParams.has("code");
+        if (request.method !== "POST" && !viaLink)
             return errorPage("Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.", opts.issuer, 405);
-        const token = await readToken(request);
+        const env = typeof process !== "undefined" ? process.env : {};
+        const issuer = opts.issuer ?? env.KLICENKA_ISSUER ?? "";
+        const token = viaLink
+            ? await tokenFromRequest(request, { issuer, audience: opts.audience ?? env.KLICENKA_AUDIENCE ?? "", environment: opts.environment ?? env.KLICENKA_ENVIRONMENT ?? "" })
+            : await readToken(request);
         if (!token || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
             return errorPage("Chybí přihlašovací token.", opts.issuer);
         }

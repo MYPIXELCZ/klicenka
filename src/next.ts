@@ -3,8 +3,9 @@ import { createLoginHandler, statusResponse, type LoginHandlerOptions } from "./
 
 /**
  * App Router:
- *   // app/klicenka/login/route.ts
+ *   // app/klicenka/login/route.ts — POST (form) and GET (link with a one-time code)
  *   export const POST = klicenkaLogin({ ...config, findAccount, startSession });
+ *   export const GET = POST;
  *   // app/klicenka/status/route.ts
  *   export const GET = klicenkaStatus("cookie");
  */

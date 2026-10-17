@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.0.3
+ * Version: 1.1.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.0.3');
+define('KLICENKA_PLUGIN_VERSION', '1.1.0');
 
 function klicenka_config()
 {
@@ -176,11 +176,43 @@ function klicenka_log($user, $payload)
     do_action('klicenka_login', $user, $entry['act'], $payload);
 }
 
+/**
+ * A link from the installed tracker app carries a one-time code (60 s) instead of
+ * the token; the token is collected for it from the tracker, server to server.
+ */
+function klicenka_redeem($code)
+{
+    $cfg = klicenka_config();
+    if (!is_string($code) || !preg_match('/^[A-Za-z0-9_-]{20,100}$/', $code)) {
+        return '';
+    }
+    $res = wp_remote_post($cfg['issuer'] . '/api/klicenka/handoff', array(
+        'timeout'     => 5,
+        'redirection' => 0,
+        'headers'     => array('Content-Type' => 'application/json'),
+        'body'        => wp_json_encode(array('code' => $code, 'audience' => $cfg['audience'] . '@' . $cfg['environment'])),
+    ));
+    if (is_wp_error($res) || (int) wp_remote_retrieve_response_code($res) !== 200) {
+        return '';
+    }
+    $data = json_decode(wp_remote_retrieve_body($res), true);
+    return (is_array($data) && isset($data['token']) && is_string($data['token'])) ? $data['token'] : '';
+}
+
 add_action('login_form_klicenka', function () {
-    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    $method = $_SERVER['REQUEST_METHOD'] ?? '';
+    $via_link = $method === 'GET' && isset($_GET['code']);
+    if ($method !== 'POST' && !$via_link) {
         klicenka_fail('Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.', 405);
     }
-    $token = isset($_POST['token']) ? wp_unslash($_POST['token']) : '';
+    if ($via_link) {
+        $token = klicenka_redeem(wp_unslash($_GET['code']));
+        if ($token === '') {
+            klicenka_fail('Přihlašovací odkaz vypršel nebo už byl použit. Klikněte v Klíčence znovu.');
+        }
+    } else {
+        $token = isset($_POST['token']) ? wp_unslash($_POST['token']) : '';
+    }
     $payload = klicenka_verify($token);
     if (is_wp_error($payload)) {
         error_log('[klicenka] refused: ' . $payload->get_error_code());

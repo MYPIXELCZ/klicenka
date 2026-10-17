@@ -7,7 +7,7 @@ Přijímací strana **Klíčenky**: přihlášení na klik z Project Trackeru do
 - **Stav webu:** `/klicenka/status` hlásí verzi a adaptér, nic citlivého. Tracker podle něj ukazuje, zda web odpovídá.
 
 ```bash
-npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.3.tar.gz
+npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.1.0.tar.gz
 ```
 
 Celý návod k zapojení je v [docs/ZAPOJENI.md](docs/ZAPOJENI.md).

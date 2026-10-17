@@ -45,7 +45,33 @@ describe("login handler", () => {
       .toMatchObject({ adapter: "cookie", audience: "kozi-pelisek", environment: "production" });
   });
   it("status reports version and adapter only", async () => {
-    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.3", protocol: 1, adapter: "cookie" });
+    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.1.0", protocol: 1, adapter: "cookie" });
+  });
+});
+
+describe("link with a one-time code", () => {
+  it("collects the token from the tracker for the code and signs in", async () => {
+    const t = await token(s.privateKey);
+    const fetchMock = vi.fn(async (url: string, init: { body: string }) => {
+      expect(url).toBe("https://tracker.test/api/klicenka/handoff");
+      expect(JSON.parse(init.body)).toEqual({ code: "c".repeat(43), audience: "kozi-pelisek@production" });
+      return new Response(JSON.stringify({ token: t }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const handle = createLoginHandler({ ...s.config(), findAccount: async () => ({ id: 1 }), startSession: async () => new Response(null, { status: 303, headers: { Location: "/admin" } }), log: () => {} });
+    const res = await handle(new Request(`https://kozi.test/klicenka/login?code=${"c".repeat(43)}`));
+    expect(res.status).toBe(303);
+    vi.unstubAllGlobals();
+  });
+  it("an expired or used code is refused without trusting anything", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 404 })));
+    const startSession = vi.fn();
+    const handle = createLoginHandler({ ...s.config(), findAccount: async () => ({ id: 1 }), startSession, log: () => {} });
+    const res = await handle(new Request(`https://kozi.test/klicenka/login?code=${"d".repeat(43)}`));
+    expect(res.status).toBe(401);
+    expect(await res.text()).toContain("vypršel");
+    expect(startSession).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });
 

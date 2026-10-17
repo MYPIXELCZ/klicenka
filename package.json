@@ -1,6 +1,6 @@
 {
   "name": "@mypixel/klicenka",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Přijímací strana Klíčenky: přihlášení na klik z Project Trackeru do webů MYPIXEL (EdDSA token, JWKS, jednorázové jti).",
   "license": "MIT",
   "type": "module",

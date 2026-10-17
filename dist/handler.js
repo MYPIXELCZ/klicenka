@@ -4,6 +4,40 @@ import { PROTOCOL, VERSION } from "./version.js";
 function defaultLog(event) {
     console.info("[klicenka]", JSON.stringify(event));
 }
+/**
+ * Opening the site from the installed tracker app has to be a plain link (only
+ * those leave the app for Safari), and a token never goes in a URL. So the link
+ * carries a one-time code instead (60 s) and the site collects the token for it
+ * straight from the tracker, server to server.
+ */
+export async function redeemHandoff(code, config) {
+    if (!/^[A-Za-z0-9_-]{20,100}$/.test(code))
+        return null;
+    try {
+        const res = await fetch(`${config.issuer.replace(/\/$/, "")}/api/klicenka/handoff`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code, audience: `${config.audience}@${config.environment}` }),
+            signal: AbortSignal.timeout(5000),
+            cache: "no-store",
+        });
+        if (!res.ok)
+            return null;
+        const data = (await res.json());
+        return typeof data.token === "string" ? data.token : null;
+    }
+    catch {
+        return null;
+    }
+}
+/** The token from a form POST, or for a one-time code on a GET link. */
+export async function tokenFromRequest(request, config) {
+    if (request.method === "GET") {
+        const code = new URL(request.url).searchParams.get("code");
+        return code ? redeemHandoff(code, config) : null;
+    }
+    return readToken(request);
+}
 /** Reads the token from a form POST (field "token"); JSON bodies work too. */
 export async function readToken(request) {
     const type = request.headers.get("content-type") ?? "";
@@ -28,10 +62,16 @@ export async function readToken(request) {
 export function createLoginHandler(opts) {
     const log = opts.log ?? defaultLog;
     return async function handle(request) {
-        if (request.method !== "POST") {
+        const viaLink = request.method === "GET" && new URL(request.url).searchParams.has("code");
+        if (request.method !== "POST" && !viaLink) {
             return errorPage("Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.", opts.issuer, 405);
         }
-        const result = await verifyKlicenkaToken(await readToken(request), opts);
+        const token = await tokenFromRequest(request, opts);
+        if (viaLink && !token) {
+            await log({ result: "refused", code: "handoff" });
+            return errorPage("Přihlašovací odkaz vypršel nebo už byl použit. Klikněte v Klíčence znovu.", opts.issuer);
+        }
+        const result = await verifyKlicenkaToken(token, opts);
         if (!result.ok) {
             await log({ result: "refused", code: result.code });
             return errorPage(result.message, opts.issuer);
