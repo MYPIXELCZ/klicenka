@@ -1,0 +1,15 @@
+{
+  "steps": [
+    {
+      "step": "defineWpConfigConsts",
+      "consts": {
+        "KLICENKA_AUDIENCE": "example-wordpress",
+        "KLICENKA_ENVIRONMENT": "local",
+        "KLICENKA_ISSUER": "http://localhost:3300"
+      }
+    }
+  ],
+  "features": {
+    "networking": true
+  }
+}

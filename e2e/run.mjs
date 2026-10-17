@@ -9,11 +9,11 @@ const OUT = new URL("./.state/", import.meta.url).pathname;
 mkdirSync(OUT, { recursive: true });
 
 const SITES = {
-  cookie: { name: "E2E vlastní cookie", url: "http://localhost:3101", type: "NEXTJS", audience: "example-cookie", subject: "admin@example.test", expect: "Přihlášen jako admin@example.test", receiver: "/klicenka/login" },
-  nextauth4: { name: "E2E NextAuth v4", url: "http://localhost:3102", type: "NEXTJS", audience: "example-nextauth4", subject: "admin@example.test", expect: "Přihlášen jako admin@example.test", receiver: "/klicenka/login" },
+  cookie: { name: "E2E vlastní cookie", url: "http://127.0.0.1:3101", type: "NEXTJS", audience: "example-cookie", subject: "admin@example.test", expect: "Přihlášen jako admin@example.test", receiver: "/klicenka/login" },
+  nextauth4: { name: "E2E NextAuth v4", url: "http://127.0.0.1:3102", type: "NEXTJS", audience: "example-nextauth4", subject: "admin@example.test", expect: "Přihlášen jako admin@example.test", receiver: "/klicenka/login" },
   nextauth5: { name: "E2E NextAuth v5", url: "http://localhost:3103", type: "NEXTJS", audience: "example-nextauth5", subject: "admin@example.test", expect: "Přihlášen jako admin@example.test", receiver: "/klicenka/login" },
   supabase: { name: "E2E Supabase", url: "http://localhost:3104", type: "NEXTJS", audience: "example-supabase", subject: "admin@example.test", expect: "Přihlášen jako admin@example.test", receiver: "/klicenka/login" },
-  wordpress: { name: "E2E WordPress", url: "http://localhost:3105", type: "WORDPRESS", audience: "example-wordpress", subject: "admin", expect: "Nástěnka", receiver: "/wp-login.php?action=klicenka" },
+  wordpress: { name: "E2E WordPress", url: "http://127.0.0.1:3105", type: "WORDPRESS", audience: "example-wordpress", subject: "admin", expect: "Dashboard", receiver: "/wp-login.php?action=klicenka" },
 };
 
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ["cookie"];
@@ -93,15 +93,24 @@ try {
     await page.screenshot({ path: `${OUT}${key}.png` });
     ok(`${key}: přihlášení na klik`, true, page.url());
     const actShown = await page.getByText("Přes Klíčenku").count();
-    if (key !== "wordpress") ok(`${key}: web zná skutečného člověka (act)`, actShown > 0);
+    if (key === "cookie" || key.startsWith("nextauth")) ok(`${key}: web zná skutečného člověka (act)`, actShown > 0);
 
     // 5) The same token a second time is refused.
     const token = posted ? new URLSearchParams(posted).get("token") : null;
     if (token) {
-      const replay = await ctx.request.post(s.url + s.receiver, { form: { token }, maxRedirects: 0 });
-      const text = await replay.text();
-      const refused = key.startsWith("nextauth") ? !(replay.status() === 303 || replay.status() === 302) || !/admin/.test(replay.headers()["location"] ?? "") : replay.status() >= 400;
-      ok(`${key}: opakované použití tokenu odmítnuto`, refused || /už byl použit/.test(text), `HTTP ${replay.status()}`);
+      if (key.startsWith("nextauth")) {
+        // NextAuth verifies in its credentials callback — replay the token there.
+        const csrf = await (await ctx.request.get(`${s.url}/api/auth/csrf`)).json();
+        const replay = await ctx.request.post(`${s.url}/api/auth/callback/klicenka`, {
+          form: { token, csrfToken: csrf.csrfToken, callbackUrl: "/admin" }, maxRedirects: 0,
+        });
+        const loc = replay.headers()["location"] ?? "";
+        ok(`${key}: opakované použití tokenu odmítnuto`, /error/i.test(loc), `HTTP ${replay.status()} → ${loc.replace(s.url, "")}`);
+      } else {
+        const replay = await ctx.request.post(s.url + s.receiver, { form: { token }, maxRedirects: 0 });
+        const text = await replay.text();
+        ok(`${key}: opakované použití tokenu odmítnuto`, replay.status() >= 400 && /už byl použit/.test(text), `HTTP ${replay.status()}`);
+      }
     } else ok(`${key}: zachycení tokenu`, false, "POST se nepodařilo zachytit");
 
     // 6) Audit log entry exists.

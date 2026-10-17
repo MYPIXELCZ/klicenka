@@ -1,0 +1,14 @@
+{
+  "name": "klicenka-example-nextauth4",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "next dev -p 3102" },
+  "dependencies": {
+    "@mypixel/klicenka": "file:../..",
+    "next": "16.4.0",
+    "next-auth": "^4.24.15",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": { "@types/node": "^22.10.0", "@types/react": "^19.3.0", "typescript": "^5.9.3" }
+}
