@@ -1,6 +1,6 @@
 import { verifyKlicenkaToken } from "./verify.js";
 import { errorPage, esc, htmlPage } from "./pages.js";
-import { readToken, tokenFromRequest } from "./handler.js";
+import { handoffCode, readToken, tokenFromRequest } from "./handler.js";
 export function klicenkaProvider(Credentials, opts) {
     const log = opts.log ?? ((e) => console.info("[klicenka]", JSON.stringify(e)));
     return Credentials({
@@ -33,7 +33,7 @@ export function nextAuthReceiver(opts) {
     const base = (opts.basePath ?? "/api/auth").replace(/\/$/, "");
     // Export it as both POST (form) and GET (link with a one-time code).
     return async function receive(request) {
-        const viaLink = request.method === "GET" && new URL(request.url).searchParams.has("code");
+        const viaLink = handoffCode(request) !== null;
         if (request.method !== "POST" && !viaLink)
             return errorPage("Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.", opts.issuer, 405);
         const env = typeof process !== "undefined" ? process.env : {};

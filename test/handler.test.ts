@@ -45,7 +45,7 @@ describe("login handler", () => {
       .toMatchObject({ adapter: "cookie", audience: "kozi-pelisek", environment: "production" });
   });
   it("status reports version and adapter only", async () => {
-    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.1.0", protocol: 1, adapter: "cookie" });
+    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.2.0", protocol: 1, adapter: "cookie" });
   });
 });
 
@@ -59,7 +59,7 @@ describe("link with a one-time code", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const handle = createLoginHandler({ ...s.config(), findAccount: async () => ({ id: 1 }), startSession: async () => new Response(null, { status: 303, headers: { Location: "/admin" } }), log: () => {} });
-    const res = await handle(new Request(`https://kozi.test/klicenka/login?code=${"c".repeat(43)}`));
+    const res = await handle(new Request(`https://kozi.test/klicenka/otevrit?k=${"c".repeat(43)}`));
     expect(res.status).toBe(303);
     vi.unstubAllGlobals();
   });

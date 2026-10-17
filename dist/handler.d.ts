@@ -37,6 +37,13 @@ export declare function redeemHandoff(code: string, config: {
     audience: string;
     environment: string;
 }): Promise<string | null>;
+/**
+ * The one-time code on a link. The parameter is "k" on /klicenka/otevrit: a link
+ * shaped like OAuth (".../login?code=…") is kept inside the installed tracker app by
+ * Safari's OAuth heuristic instead of going to the normal Safari window. "code" is
+ * still read for links from 1.1.
+ */
+export declare function handoffCode(request: Request): string | null;
 /** The token from a form POST, or for a one-time code on a GET link. */
 export declare function tokenFromRequest(request: Request, config: {
     issuer: string;

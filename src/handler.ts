@@ -49,13 +49,25 @@ export async function redeemHandoff(
   }
 }
 
+/**
+ * The one-time code on a link. The parameter is "k" on /klicenka/otevrit: a link
+ * shaped like OAuth (".../login?code=…") is kept inside the installed tracker app by
+ * Safari's OAuth heuristic instead of going to the normal Safari window. "code" is
+ * still read for links from 1.1.
+ */
+export function handoffCode(request: Request): string | null {
+  if (request.method !== "GET") return null;
+  const q = new URL(request.url).searchParams;
+  return q.get("k") ?? q.get("code");
+}
+
 /** The token from a form POST, or for a one-time code on a GET link. */
 export async function tokenFromRequest(
   request: Request,
   config: { issuer: string; audience: string; environment: string },
 ): Promise<string | null> {
   if (request.method === "GET") {
-    const code = new URL(request.url).searchParams.get("code");
+    const code = handoffCode(request);
     return code ? redeemHandoff(code, config) : null;
   }
   return readToken(request);
@@ -85,7 +97,7 @@ export async function readToken(request: Request): Promise<string | null> {
 export function createLoginHandler<User>(opts: LoginHandlerOptions<User>) {
   const log = opts.log ?? defaultLog;
   return async function handle(request: Request): Promise<Response> {
-    const viaLink = request.method === "GET" && new URL(request.url).searchParams.has("code");
+    const viaLink = handoffCode(request) !== null;
     if (request.method !== "POST" && !viaLink) {
       return errorPage("Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.", opts.issuer, 405);
     }

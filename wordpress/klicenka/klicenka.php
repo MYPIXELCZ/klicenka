@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.1.0');
+define('KLICENKA_PLUGIN_VERSION', '1.2.0');
 
 function klicenka_config()
 {
@@ -199,20 +199,37 @@ function klicenka_redeem($code)
     return (is_array($data) && isset($data['token']) && is_string($data['token'])) ? $data['token'] : '';
 }
 
+/**
+ * Link with a one-time code: wp-admin/admin-ajax.php?action=klicenka_otevrit&k=…
+ * (not wp-login.php?…code=…, which Safari's OAuth heuristic keeps inside the
+ * installed tracker app). The old wp-login link from 1.1 still works.
+ */
+function klicenka_open_link()
+{
+    $code = isset($_GET['k']) ? wp_unslash($_GET['k']) : (isset($_GET['code']) ? wp_unslash($_GET['code']) : '');
+    $token = klicenka_redeem($code);
+    if ($token === '') {
+        klicenka_fail('Přihlašovací odkaz vypršel nebo už byl použit. Klikněte v Klíčence znovu.');
+    }
+    klicenka_sign_in($token);
+}
+add_action('wp_ajax_nopriv_klicenka_otevrit', 'klicenka_open_link');
+add_action('wp_ajax_klicenka_otevrit', 'klicenka_open_link');
+
 add_action('login_form_klicenka', function () {
     $method = $_SERVER['REQUEST_METHOD'] ?? '';
-    $via_link = $method === 'GET' && isset($_GET['code']);
-    if ($method !== 'POST' && !$via_link) {
+    if ($method === 'GET' && (isset($_GET['code']) || isset($_GET['k']))) {
+        klicenka_open_link();
+    }
+    if ($method !== 'POST') {
         klicenka_fail('Sem se přichází tlačítkem „Přihlásit se“ v Klíčence.', 405);
     }
-    if ($via_link) {
-        $token = klicenka_redeem(wp_unslash($_GET['code']));
-        if ($token === '') {
-            klicenka_fail('Přihlašovací odkaz vypršel nebo už byl použit. Klikněte v Klíčence znovu.');
-        }
-    } else {
-        $token = isset($_POST['token']) ? wp_unslash($_POST['token']) : '';
-    }
+    klicenka_sign_in(isset($_POST['token']) ? wp_unslash($_POST['token']) : '');
+});
+
+/** Verify the token, sign in exactly the named account, log the real person. */
+function klicenka_sign_in($token)
+{
     $payload = klicenka_verify($token);
     if (is_wp_error($payload)) {
         error_log('[klicenka] refused: ' . $payload->get_error_code());
@@ -241,7 +258,7 @@ add_action('login_form_klicenka', function () {
     nocache_headers();
     wp_safe_redirect(klicenka_config()['redirect']);
     exit;
-});
+}
 
 function klicenka_status()
 {

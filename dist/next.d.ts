@@ -4,7 +4,8 @@ import { type LoginHandlerOptions } from "./handler.js";
  * App Router:
  *   // app/klicenka/login/route.ts — POST (form) and GET (link with a one-time code)
  *   export const POST = klicenkaLogin({ ...config, findAccount, startSession });
- *   export const GET = POST;
+ *   // app/klicenka/otevrit/route.ts — link with a one-time code (?k=…)
+ *   export { POST as GET } from "../login/route";
  *   // app/klicenka/status/route.ts
  *   export const GET = klicenkaStatus("cookie");
  */
