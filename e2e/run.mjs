@@ -84,6 +84,7 @@ try {
     await btn.waitFor({ timeout: 20000 });
     ok(`${key}: v nabídce jen použitelný účet`, (await btn.getAttribute("title")) === "Přihlásit se jako Admin");
     let posted = null;
+    ctx.on("request", (r) => { if (r.method() === "POST" && r.url().startsWith(s.url + s.receiver.split("?")[0])) posted = r.postData(); });
     const onReq = (r) => { if (r.method() === "POST" && r.url().startsWith(s.url + s.receiver.split("?")[0])) posted = r.postData(); };
     page.on("request", onReq);
     await btn.hover();
@@ -91,12 +92,20 @@ try {
     await btn.click();
     const confirm = row.getByRole("button", { name: "Potvrdit passkey" });
     if (await confirm.isVisible().catch(() => false)) await confirm.click();
-    await page.waitForURL((u) => u.toString().startsWith(s.url), { timeout: 30000 });
-    await page.getByText(s.expect).first().waitFor({ timeout: 30000 });
+    // After the passkey the button turns into "Otevřít web", which opens a new window.
+    const open = row.getByRole("button", { name: "Otevřít web" });
+    await open.waitFor({ timeout: 30000 });
+    const popupPromise = ctx.waitForEvent("page");
+    await open.click();
+    const site = await popupPromise;
+    site.on("request", onReq);
+    await site.waitForURL((u) => u.toString().startsWith(s.url), { timeout: 30000 });
+    await site.getByText(s.expect).first().waitFor({ timeout: 30000 });
     page.off("request", onReq);
-    await page.screenshot({ path: `${OUT}${key}.png` });
-    ok(`${key}: přihlášení na klik`, true, page.url());
-    const actShown = await page.getByText("Přes Klíčenku").count();
+    await site.screenshot({ path: `${OUT}${key}.png` });
+    ok(`${key}: přihlášení na klik (nové okno)`, true, site.url());
+    const actShown = await site.getByText("Přes Klíčenku").count();
+    await site.close();
     if (key === "cookie" || key.startsWith("nextauth")) ok(`${key}: web zná skutečného člověka (act)`, actShown > 0);
 
     // 5) The same token a second time is refused.
