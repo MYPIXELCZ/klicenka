@@ -25,5 +25,15 @@ export type SupabaseKlicenkaOptions = Omit<KlicenkaConfig, "jtiStore"> & {
 };
 export declare const UNTIL_COOKIE = "klicenka_until";
 export declare function supabaseKlicenka(opts: SupabaseKlicenkaOptions): (request: Request) => Promise<Response>;
+/**
+ * The keyring's time limit for a Supabase session. The cookie itself outlives the
+ * limit (30 days) on purpose: if it expired together with the limit, the browser
+ * would drop it exactly when the middleware should see it as passed — and the
+ * Supabase session would carry on. Delete it on a normal password sign-in
+ * (clearUntilCookie) so it can't end that session.
+ */
+export declare function untilCookie(maxAgeSeconds: number, now?: number): string;
+/** Set-Cookie value that removes the limit — after a password sign-in or a sign-out. */
+export declare function clearUntilCookie(): string;
 /** In middleware: true when a keyring session has outlived its limit — sign the user out. */
 export declare function klicenkaSessionExpired(cookieValue: string | undefined, now?: number): boolean;

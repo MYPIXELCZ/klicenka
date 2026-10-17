@@ -19,10 +19,10 @@ Rotace klíče v trackeru (nový `kid`) zneplatní všechny dříve vydané toke
 ## Instalace balíčku
 
 ```bash
-npm install github:MYPIXELCZ/klicenka#v1.0.0
+npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.1.tar.gz
 ```
 
-Balíček je veřejný a neobsahuje nic tajného. Na Vercelu nepotřebuje žádný token.
+Balíček je veřejný a neobsahuje nic tajného. Instaluje se jako tarball konkrétní verze, takže lockfile má https adresu s kontrolním součtem. Na Vercelu nepotřebuje token ani git. Zápis `github:…` nepoužívejte, npm by do lockfilu uložil `git+ssh` a build bez SSH klíče by selhal.
 
 Proměnné prostředí webu (Vercel → Settings → Environment Variables):
 
@@ -120,12 +120,14 @@ export const POST = supabaseKlicenka({
 
 `sub` je e-mail nebo id uživatele v Supabase. Služební klíč vytvoří jednorázový odkaz pro přesně tohoto uživatele a uplatní ho na serveru. Prohlížeč dostane běžnou session, nic se neposílá e-mailem.
 
-Supabase řídí délku své session sám. Kratší limit Klíčenky hlídejte v middleware:
+Supabase řídí délku své session sám. Kratší limit Klíčenky nese cookie `klicenka_until`. Ta schválně žije 30 dní a o konci rozhoduje hodnota uvnitř. Hlídejte ji v middleware:
 
 ```ts
 import { klicenkaSessionExpired, UNTIL_COOKIE } from "@mypixel/klicenka/supabase";
 if (klicenkaSessionExpired(req.cookies.get(UNTIL_COOKIE)?.value)) { /* supabase.auth.signOut() a přesměrovat na login */ }
 ```
+
+Po běžném přihlášení heslem a po odhlášení limit smažte: `response.headers.append("Set-Cookie", clearUntilCookie())`. Jinak by limit ukončil i session přihlášenou heslem.
 
 ## Adaptér 3: NextAuth v4 (i Pages Router) a v5
 

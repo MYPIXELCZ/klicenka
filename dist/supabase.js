@@ -68,11 +68,25 @@ export function supabaseKlicenka(opts) {
             const { error: otpError } = await supabase.auth.verifyOtp({ type: "email", token_hash: link.properties.hashed_token });
             if (otpError)
                 throw otpError;
-            const until = Date.now() + maxAgeSeconds * 1000;
-            res.headers.append("Set-Cookie", serialize(UNTIL_COOKIE, String(until), { path: "/", maxAge: maxAgeSeconds, httpOnly: true, sameSite: "lax", secure: true }));
+            res.headers.append("Set-Cookie", untilCookie(maxAgeSeconds));
             return res;
         },
     });
+}
+/**
+ * The keyring's time limit for a Supabase session. The cookie itself outlives the
+ * limit (30 days) on purpose: if it expired together with the limit, the browser
+ * would drop it exactly when the middleware should see it as passed — and the
+ * Supabase session would carry on. Delete it on a normal password sign-in
+ * (clearUntilCookie) so it can't end that session.
+ */
+export function untilCookie(maxAgeSeconds, now = Date.now()) {
+    return serialize(UNTIL_COOKIE, String(now + maxAgeSeconds * 1000), { path: "/", maxAge: UNTIL_COOKIE_LIFETIME, httpOnly: true, sameSite: "lax", secure: true });
+}
+const UNTIL_COOKIE_LIFETIME = 30 * 24 * 3600;
+/** Set-Cookie value that removes the limit — after a password sign-in or a sign-out. */
+export function clearUntilCookie() {
+    return serialize(UNTIL_COOKIE, "", { path: "/", maxAge: 0, httpOnly: true, sameSite: "lax", secure: true });
 }
 /** In middleware: true when a keyring session has outlived its limit — sign the user out. */
 export function klicenkaSessionExpired(cookieValue, now = Date.now()) {

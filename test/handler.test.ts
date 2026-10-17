@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createLoginHandler, redirectWithCookie, statusResponse } from "../src/handler.js";
 import { toPagesHandler } from "../src/next.js";
 import { klicenkaJwt, klicenkaProvider, klicenkaSessionValid, nextAuthReceiver } from "../src/next-auth.js";
-import { klicenkaSessionExpired } from "../src/supabase.js";
+import { clearUntilCookie, klicenkaSessionExpired, untilCookie } from "../src/supabase.js";
 import { setup, token } from "./helpers.js";
 import { EventEmitter } from "node:events";
 
@@ -41,7 +41,7 @@ describe("login handler", () => {
     expect(await res.text()).toContain("Podpis");
   });
   it("status reports version and adapter only", async () => {
-    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.0", protocol: 1, adapter: "cookie" });
+    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.1", protocol: 1, adapter: "cookie" });
   });
 });
 
@@ -79,6 +79,14 @@ describe("NextAuth adapter", () => {
     expect(klicenkaSessionValid({ sub: "password-login" }, 1e15)).toBe(true);
     expect(klicenkaSessionExpired("1000", 1001)).toBe(true);
     expect(klicenkaSessionExpired(undefined)).toBe(false);
+  });
+  it("Supabase limit cookie outlives the limit, so the middleware can see it pass", () => {
+    const c = untilCookie(2 * 3600, 1_000_000);
+    expect(c).toContain("klicenka_until=8200000");
+    const maxAge = Number(/Max-Age=(\d+)/.exec(c)![1]);
+    expect(maxAge).toBeGreaterThan(2 * 3600);
+    expect(klicenkaSessionExpired("8200000", 8200001)).toBe(true);
+    expect(clearUntilCookie()).toContain("Max-Age=0");
   });
   it("receiver passes the token on in a form, never a URL", async () => {
     const res = await nextAuthReceiver({ redirectTo: "/admin" })(post("aaa.bbb.ccc"));
