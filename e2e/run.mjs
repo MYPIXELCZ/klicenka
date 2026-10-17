@@ -73,8 +73,12 @@ try {
     const denied = await api("/api/klicenka/login/options", "POST", { accountId: hidden.body.account.id });
     ok(`${key}: skrytý účet token nedostane`, denied.status === 403, denied.body?.error);
 
-    // 4) Click "Přihlásit se" in the keyring and land in the site's admin.
-    await page.goto(`${TRACKER}/klicenka`);
+    // 4) Click "Přihlásit se" in the keyring and land in the site's admin. Arrive
+    // through the menu (soft navigation), like a person does: the first loaded page's
+    // CSP stays in force, which once blocked the token form.
+    await page.goto(`${TRACKER}/dashboard`);
+    await page.getByRole("link", { name: "Klíčenka" }).first().click();
+    await page.waitForURL(/\/klicenka$/);
     const row = page.locator("li", { has: page.getByRole("link", { name: s.name, exact: true }) });
     const btn = row.getByRole("button", { name: "Přihlásit se" });
     await btn.waitFor({ timeout: 20000 });
