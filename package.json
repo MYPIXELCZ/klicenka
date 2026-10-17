@@ -1,0 +1,66 @@
+{
+  "name": "@mypixel/klicenka",
+  "version": "1.0.0",
+  "description": "Přijímací strana Klíčenky: přihlášení na klik z Project Trackeru do webů MYPIXEL (EdDSA token, JWKS, jednorázové jti).",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MYPIXELCZ/klicenka.git"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "import": "./dist/next.js"
+    },
+    "./supabase": {
+      "types": "./dist/supabase.d.ts",
+      "import": "./dist/supabase.js"
+    },
+    "./next-auth": {
+      "types": "./dist/next-auth.d.ts",
+      "import": "./dist/next-auth.js"
+    }
+  },
+  "files": [
+    "dist",
+    "wordpress",
+    "docs",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "peerDependencies": {
+    "@supabase/ssr": ">=0.5.0",
+    "@supabase/supabase-js": ">=2.40.0"
+  },
+  "peerDependenciesMeta": {
+    "@supabase/ssr": {
+      "optional": true
+    },
+    "@supabase/supabase-js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.118.0",
+    "@types/node": "^22.10.0",
+    "playwright": "^1.64.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
