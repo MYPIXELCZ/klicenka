@@ -41,7 +41,7 @@ describe("login handler", () => {
     expect(await res.text()).toContain("Podpis");
   });
   it("status reports version and adapter only", async () => {
-    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.1", protocol: 1, adapter: "cookie" });
+    expect(await statusResponse("cookie").json()).toEqual({ name: "klicenka", version: "1.0.2", protocol: 1, adapter: "cookie" });
   });
 });
 

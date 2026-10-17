@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.0.1');
+define('KLICENKA_PLUGIN_VERSION', '1.0.2');
 
 function klicenka_config()
 {

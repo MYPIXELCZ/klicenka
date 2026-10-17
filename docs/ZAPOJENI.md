@@ -19,7 +19,7 @@ Rotace klíče v trackeru (nový `kid`) zneplatní všechny dříve vydané toke
 ## Instalace balíčku
 
 ```bash
-npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.1.tar.gz
+npm install https://github.com/MYPIXELCZ/klicenka/archive/refs/tags/v1.0.2.tar.gz
 ```
 
 Balíček je veřejný a neobsahuje nic tajného. Instaluje se jako tarball konkrétní verze, takže lockfile má https adresu s kontrolním součtem. Na Vercelu nepotřebuje token ani git. Zápis `github:…` nepoužívejte, npm by do lockfilu uložil `git+ssh` a build bez SSH klíče by selhal.
@@ -63,6 +63,8 @@ create table if not exists public.klicenka_jti (jti text primary key, expires_at
 alter table public.klicenka_jti enable row level security; -- bez policy: jen service role
 create index if not exists klicenka_jti_expires_at on public.klicenka_jti (expires_at);
 ```
+
+Duplicitní klíč znamená opakovaný token, web pak hlásí „už byl použit“. Jiná chyba databáze, třeba chybějící tabulka nebo grant, se hlásí zvlášť: „Web nemůže ověřit jednorázovost přihlášení“. Podrobnosti jsou v logu jako `[klicenka] jti store failed`. Když databáze hlásí duplicitu jinak než Prisma (`P2002`) nebo Postgres (`23505`), předejte `isDuplicate`.
 
 ## Adaptér 1: vlastní cookie session (jose / bcrypt)
 

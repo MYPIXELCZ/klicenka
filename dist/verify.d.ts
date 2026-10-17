@@ -39,7 +39,7 @@ export type VerifyFailure = {
     code: VerifyCode;
     message: string;
 };
-export type VerifyCode = "missing" | "malformed" | "signature" | "unknown-key" | "expired" | "audience" | "issuer" | "used" | "claims";
+export type VerifyCode = "missing" | "malformed" | "signature" | "unknown-key" | "expired" | "audience" | "issuer" | "used" | "claims" | "store";
 export declare const TOKEN_TYPE = "klicenka+jwt";
 export declare function audienceOf(config: Pick<KlicenkaConfig, "audience" | "environment">): string;
 /**

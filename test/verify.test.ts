@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { SignJWT } from "jose";
 import { verifyKlicenkaToken } from "../src/verify.js";
+import { createJtiStore } from "../src/jti.js";
 import { setup, token } from "./helpers.js";
 
 let s: Awaited<ReturnType<typeof setup>>;
@@ -58,5 +59,13 @@ describe("verifyKlicenkaToken", () => {
   });
   it("refuses a token without act", async () => {
     expect((await verifyKlicenkaToken(await token(s.privateKey, { act: "nobody" }), s.config())).ok).toBe(false);
+  });
+  it("a broken jti store is a setup error, a duplicate key is a replay", async () => {
+    const broken = createJtiStore({ insert: async () => { throw new Error('relation "klicenka_jti" does not exist'); } });
+    expect(await verifyKlicenkaToken(await token(s.privateKey), s.config({ jtiStore: broken }))).toMatchObject({ ok: false, code: "store" });
+    const dup = createJtiStore({ insert: async () => { throw Object.assign(new Error("dup"), { code: "23505" }); } });
+    expect(await verifyKlicenkaToken(await token(s.privateKey), s.config({ jtiStore: dup }))).toMatchObject({ ok: false, code: "used" });
+    const prisma = createJtiStore({ insert: async () => { throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" }); } });
+    expect(await verifyKlicenkaToken(await token(s.privateKey), s.config({ jtiStore: prisma }))).toMatchObject({ ok: false, code: "used" });
   });
 });

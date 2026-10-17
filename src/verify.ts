@@ -36,7 +36,7 @@ export type KlicenkaClaims = {
 };
 
 export type VerifyFailure = { ok: false; code: VerifyCode; message: string };
-export type VerifyCode = "missing" | "malformed" | "signature" | "unknown-key" | "expired" | "audience" | "issuer" | "used" | "claims";
+export type VerifyCode = "missing" | "malformed" | "signature" | "unknown-key" | "expired" | "audience" | "issuer" | "used" | "claims" | "store";
 
 const MESSAGES: Record<VerifyCode, string> = {
   missing: "Chybí přihlašovací token.",
@@ -48,6 +48,7 @@ const MESSAGES: Record<VerifyCode, string> = {
   issuer: "Token nevydal náš Project Tracker.",
   used: "Tento přihlašovací odkaz už byl použit. Klikněte v trackeru znovu.",
   claims: "Přihlašovací token nemá potřebné údaje.",
+  store: "Web nemůže ověřit jednorázovost přihlášení. Nejspíš chybí tabulka klicenka_jti (spusťte migraci) nebo k ní nemá přístup.",
 };
 
 export const TOKEN_TYPE = "klicenka+jwt";
@@ -118,7 +119,14 @@ export async function verifyKlicenkaToken(
   ) return fail("claims");
   if (payload.exp - payload.iat > MAX_TTL_SEC) return fail("claims");
 
-  if (!(await config.jtiStore.consume(payload.jti, new Date((payload.exp + tolerance) * 1000)))) return fail("used");
+  let fresh: boolean;
+  try {
+    fresh = await config.jtiStore.consume(payload.jti, new Date((payload.exp + tolerance) * 1000));
+  } catch (e) {
+    console.error("[klicenka] jti store failed", (e as { cause?: unknown }).cause ?? e);
+    return fail("store");
+  }
+  if (!fresh) return fail("used");
 
   const sh = typeof payload.sh === "number" && payload.sh > 0 && payload.sh <= 72 ? payload.sh : 8;
   return {

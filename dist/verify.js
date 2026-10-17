@@ -9,6 +9,7 @@ const MESSAGES = {
     issuer: "Token nevydal náš Project Tracker.",
     used: "Tento přihlašovací odkaz už byl použit. Klikněte v trackeru znovu.",
     claims: "Přihlašovací token nemá potřebné údaje.",
+    store: "Web nemůže ověřit jednorázovost přihlášení. Nejspíš chybí tabulka klicenka_jti (spusťte migraci) nebo k ní nemá přístup.",
 };
 export const TOKEN_TYPE = "klicenka+jwt";
 const MAX_TTL_SEC = 60;
@@ -78,7 +79,15 @@ export async function verifyKlicenkaToken(token, config) {
         return fail("claims");
     if (payload.exp - payload.iat > MAX_TTL_SEC)
         return fail("claims");
-    if (!(await config.jtiStore.consume(payload.jti, new Date((payload.exp + tolerance) * 1000))))
+    let fresh;
+    try {
+        fresh = await config.jtiStore.consume(payload.jti, new Date((payload.exp + tolerance) * 1000));
+    }
+    catch (e) {
+        console.error("[klicenka] jti store failed", e.cause ?? e);
+        return fail("store");
+    }
+    if (!fresh)
         return fail("used");
     const sh = typeof payload.sh === "number" && payload.sh > 0 && payload.sh <= 72 ? payload.sh : 8;
     return {
