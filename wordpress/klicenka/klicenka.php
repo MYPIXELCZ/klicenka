@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.2.0');
+define('KLICENKA_PLUGIN_VERSION', '1.3.0');
 
 function klicenka_config()
 {
@@ -75,10 +75,25 @@ function klicenka_keys($refresh = false)
     return $keys;
 }
 
-/** @return array|WP_Error the verified payload */
-function klicenka_verify($token)
+/**
+ * @param array $opts Optional (since 1.3.0), for other mu-plugins such as klicenka-upravy:
+ *   'typ'        token type in the header; default 'klicenka+jwt' (login)
+ *   'max_ttl'    longest allowed exp - iat in seconds; default 60, hard cap 900
+ *   'single_use' reject a second use of the same jti; default true
+ *   A login token ('klicenka+jwt') is always 60 s and single use, whatever $opts say.
+ * @return array|WP_Error the verified payload
+ */
+function klicenka_verify($token, $opts = array())
 {
     $cfg = klicenka_config();
+    $opts = array_merge(array('typ' => 'klicenka+jwt', 'max_ttl' => 60, 'single_use' => true), is_array($opts) ? $opts : array());
+    $typ = (string) $opts['typ'];
+    $max_ttl = max(1, min(900, (int) $opts['max_ttl']));
+    $single_use = (bool) $opts['single_use'];
+    if ($typ === 'klicenka+jwt') {
+        $max_ttl = 60;
+        $single_use = true;
+    }
     if (!is_string($token) || !preg_match('/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/', $token)) {
         return new WP_Error('malformed', 'Přihlašovací token chybí nebo je poškozený.');
     }
@@ -95,7 +110,7 @@ function klicenka_verify($token)
     if (!is_array($header) || !is_array($payload) || $sig === false || strlen($sig) !== SODIUM_CRYPTO_SIGN_BYTES) {
         return new WP_Error('malformed', 'Přihlašovací token je poškozený.');
     }
-    if (($header['alg'] ?? '') !== 'EdDSA' || ($header['typ'] ?? '') !== 'klicenka+jwt' || empty($header['kid'])) {
+    if (($header['alg'] ?? '') !== 'EdDSA' || ($header['typ'] ?? '') !== $typ || empty($header['kid'])) {
         return new WP_Error('malformed', 'Přihlašovací token má neznámý formát.');
     }
 
@@ -124,10 +139,10 @@ function klicenka_verify($token)
     }
     $exp = $payload['exp'] ?? null;
     $iat = $payload['iat'] ?? null;
-    if (!is_int($exp) || !is_int($iat) || $exp + $tol < $now || $iat - $tol > $now || $now - $iat > 60 + $tol) {
+    if (!is_int($exp) || !is_int($iat) || $exp + $tol < $now || $iat - $tol > $now || $now - $iat > $max_ttl + $tol) {
         return new WP_Error('expired', 'Přihlašovací odkaz vypršel. Klikněte v trackeru znovu.');
     }
-    if ($exp - $iat > 60) {
+    if ($exp - $iat > $max_ttl) {
         return new WP_Error('claims', 'Přihlašovací token má neplatnou dobu platnosti.');
     }
     $act = $payload['act'] ?? null;
@@ -137,11 +152,13 @@ function klicenka_verify($token)
     }
 
     // One use per token id.
-    $jti_key = 'klicenka_jti_' . md5($payload['jti']);
-    if (get_transient($jti_key) !== false) {
-        return new WP_Error('used', 'Tento přihlašovací odkaz už byl použit. Klikněte v trackeru znovu.');
+    if ($single_use) {
+        $jti_key = 'klicenka_jti_' . md5($payload['jti']);
+        if (get_transient($jti_key) !== false) {
+            return new WP_Error('used', 'Tento přihlašovací odkaz už byl použit. Klikněte v trackeru znovu.');
+        }
+        set_transient($jti_key, 1, max(180, $max_ttl + 2 * $tol));
     }
-    set_transient($jti_key, 1, 180);
 
     return $payload;
 }
