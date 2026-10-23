@@ -6,7 +6,7 @@
  * Requires PHP: 7.4
  * License: MIT
  *
- * Patří do wp-content/mu-plugins/ vedle klicenka.php (od verze 1.3.0), jehož ověření tokenu používá.
+ * Patří do wp-content/mu-plugins/ vedle klicenka.php (jakákoli verze 1.x), jehož konfiguraci a klíče používá.
  * Token: hlavička typ "klicenka-stav+jwt", claimy jako u Klíčenky (iss, aud, sub, act, jti, iat, exp)
  * a scope "stav"; nejvýš 60 s. Posílá se v "Authorization: Bearer …". Nikdy v URL.
  * Nic nemění, nepřihlašuje a nevrací žádná data obsahu ani uživatelů.
@@ -28,22 +28,64 @@ function klicenka_stav_token(WP_REST_Request $request)
     return preg_match('/^\s*Bearer\s+(\S+)\s*$/i', $auth, $m) ? $m[1] : '';
 }
 
+/**
+ * Vlastní ověření tokenu nad konfigurací a klíči z klicenka.php (funguje s 1.0–1.3):
+ * EdDSA podpis klíčem z JWKS trackeru, typ klicenka-stav+jwt, náš issuer a audience,
+ * nejvýš 60 s, jednorázové jti, scope "stav". Přihlašovací token sem neprojde a tento
+ * token nikoho nepřihlásí.
+ * @return true|WP_Error
+ */
 function klicenka_stav_authorize(WP_REST_Request $request)
 {
-    if (!function_exists('klicenka_verify') || !defined('KLICENKA_PLUGIN_VERSION') || version_compare(KLICENKA_PLUGIN_VERSION, '1.3.0', '<')) {
-        return new WP_Error('config', 'Chybí klicenka.php 1.3.0 nebo novější v mu-plugins.', array('status' => 500));
+    if (!function_exists('klicenka_config') || !function_exists('klicenka_keys') || !function_exists('klicenka_b64url_decode') || !function_exists('sodium_crypto_sign_verify_detached')) {
+        return new WP_Error('config', 'Chybí klicenka.php v mu-plugins.', array('status' => 500));
     }
+    $deny = function ($why) {
+        return new WP_Error('unauthorized', $why, array('status' => 401));
+    };
     $token = klicenka_stav_token($request);
-    if ($token === '') {
-        return new WP_Error('unauthorized', 'Chybí token.', array('status' => 401));
+    if (!preg_match('/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/', $token)) {
+        return $deny('Chybí token.');
     }
-    $payload = klicenka_verify($token, array('typ' => KLICENKA_STAV_TYP, 'max_ttl' => 60, 'single_use' => true));
-    if (is_wp_error($payload)) {
-        return new WP_Error('unauthorized', $payload->get_error_message(), array('status' => 401));
+    list($h64, $p64, $s64) = explode('.', $token);
+    $header = json_decode((string) klicenka_b64url_decode($h64), true);
+    $payload = json_decode((string) klicenka_b64url_decode($p64), true);
+    $sig = klicenka_b64url_decode($s64);
+    if (!is_array($header) || !is_array($payload) || $sig === false || strlen($sig) !== SODIUM_CRYPTO_SIGN_BYTES) {
+        return $deny('Token je poškozený.');
     }
-    if (($payload['scope'] ?? '') !== 'stav') {
+    if (($header['alg'] ?? '') !== 'EdDSA' || ($header['typ'] ?? '') !== KLICENKA_STAV_TYP || empty($header['kid'])) {
+        return $deny('Token má neznámý formát.');
+    }
+    $kid = (string) $header['kid'];
+    $keys = klicenka_keys();
+    if (!isset($keys[$kid])) {
+        $keys = klicenka_keys(true);
+    }
+    $pk = isset($keys[$kid]) ? klicenka_b64url_decode($keys[$kid]) : false;
+    if ($pk === false || strlen($pk) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES || !sodium_crypto_sign_verify_detached($sig, $h64 . '.' . $p64, $pk)) {
+        return $deny('Podpis tokenu nesedí.');
+    }
+    $cfg = klicenka_config();
+    $now = time();
+    $tol = (int) $cfg['tolerance'];
+    $aud = isset($payload['aud']) ? (array) $payload['aud'] : array();
+    $exp = $payload['exp'] ?? null;
+    $iat = $payload['iat'] ?? null;
+    if (($payload['iss'] ?? '') !== $cfg['issuer'] || !in_array($cfg['audience'] . '@' . $cfg['environment'], $aud, true)) {
+        return $deny('Token není pro tento web.');
+    }
+    if (!is_int($exp) || !is_int($iat) || $exp + $tol < $now || $iat - $tol > $now || $exp - $iat > 60) {
+        return $deny('Token vypršel.');
+    }
+    if (($payload['scope'] ?? '') !== 'stav' || empty($payload['jti']) || !is_string($payload['jti'])) {
         return new WP_Error('forbidden', 'Token nemá oprávnění pro tuto akci.', array('status' => 403));
     }
+    $jti_key = 'klicenka_stav_jti_' . md5($payload['jti']);
+    if (get_transient($jti_key) !== false) {
+        return $deny('Token už byl použit.');
+    }
+    set_transient($jti_key, 1, 180);
     return true;
 }
 
