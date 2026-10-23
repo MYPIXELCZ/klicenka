@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.3.0
+ * Version: 1.4.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -15,13 +15,17 @@
  *
  * Token přijímá na wp-login.php?action=klicenka (POST, pole "token"), stav hlásí na
  * wp-admin/admin-ajax.php?action=klicenka_status.
+ *
+ * Od 1.4.0 se sám aktualizuje: jednou denně (a hned po kliknutí v trackeru) stáhne z trackeru seznam souborů
+ * podepsaný klíčem Klíčenky, ověří podpis, otisky i syntaxi PHP a nahradí soubory v mu-plugins. Předchozí verze
+ * zůstane vedle s příponou .prev. Vypnout: define('KLICENKA_AUTO_UPDATE', false);
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.3.0');
+define('KLICENKA_PLUGIN_VERSION', '1.4.0');
 
 function klicenka_config()
 {
@@ -282,6 +286,9 @@ function klicenka_status()
     nocache_headers();
     $cfg = klicenka_config();
     $out = array('name' => 'klicenka', 'version' => KLICENKA_PLUGIN_VERSION, 'protocol' => 1, 'adapter' => 'wordpress');
+    // Od 1.4.0: jestli je nainstalovaný plugin pro úpravy Claudem a zda se web umí sám aktualizovat.
+    $out['upravy'] = file_exists(__DIR__ . '/klicenka-upravy.php');
+    $out['autoUpdate'] = !(defined('KLICENKA_AUTO_UPDATE') && !KLICENKA_AUTO_UPDATE);
     // The identifier and environment are the token's audience — public, and the
     // tracker reads them when the site is added.
     if ($cfg['audience'] !== '') {
@@ -292,3 +299,150 @@ function klicenka_status()
 }
 add_action('wp_ajax_nopriv_klicenka_status', 'klicenka_status');
 add_action('wp_ajax_klicenka_status', 'klicenka_status');
+
+// ---------------------------------------------------------------------------
+// Samoaktualizace (1.4.0)
+// ---------------------------------------------------------------------------
+
+/** Soubory, které smí aktualizace měnit (jen v adresáři tohoto mu-pluginu). */
+function klicenka_update_allowed()
+{
+    return array('klicenka.php', 'klicenka-upravy.php');
+}
+
+/** Podepsaný manifest z trackeru: {payload: base64url(JSON), kid, sig}. Vrací ověřený obsah, nebo WP_Error. */
+function klicenka_update_manifest()
+{
+    $cfg = klicenka_config();
+    $res = wp_remote_get($cfg['issuer'] . '/api/klicenka/wordpress/manifest', array('timeout' => 10, 'redirection' => 0));
+    if (is_wp_error($res) || (int) wp_remote_retrieve_response_code($res) !== 200) {
+        return new WP_Error('manifest', 'Tracker nevrátil seznam verzí.');
+    }
+    $m = json_decode(wp_remote_retrieve_body($res), true);
+    if (!is_array($m) || empty($m['payload']) || empty($m['kid']) || empty($m['sig'])) {
+        return new WP_Error('manifest', 'Seznam verzí je poškozený.');
+    }
+    if (!function_exists('sodium_crypto_sign_verify_detached')) {
+        return new WP_Error('config', 'Server nemá rozšíření sodium.');
+    }
+    $keys = klicenka_keys();
+    if (!isset($keys[$m['kid']])) {
+        $keys = klicenka_keys(true);
+    }
+    $pk = isset($keys[$m['kid']]) ? klicenka_b64url_decode($keys[$m['kid']]) : false;
+    $sig = klicenka_b64url_decode((string) $m['sig']);
+    if ($pk === false || $sig === false || strlen($pk) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES || strlen($sig) !== SODIUM_CRYPTO_SIGN_BYTES
+        || !sodium_crypto_sign_verify_detached($sig, (string) $m['payload'], $pk)) {
+        return new WP_Error('signature', 'Podpis seznamu verzí nesedí.');
+    }
+    $payload = json_decode((string) klicenka_b64url_decode((string) $m['payload']), true);
+    if (!is_array($payload) || empty($payload['version']) || empty($payload['files']) || !is_array($payload['files'])
+        || ($payload['iss'] ?? '') !== $cfg['issuer'] || !is_int($payload['iat'] ?? null) || abs(time() - $payload['iat']) > 3600) {
+        return new WP_Error('manifest', 'Seznam verzí je neplatný nebo starý.');
+    }
+    return $payload;
+}
+
+/**
+ * Aktualizuje soubory, které na webu už jsou; $install = soubory, které se mají nově přidat
+ * (jen z povoleného seznamu, např. klicenka-upravy.php na webech s úpravami Claudem).
+ * @return array|WP_Error {version, updated: [...], unchanged: [...]}
+ */
+function klicenka_update_run($install = array())
+{
+    if (defined('KLICENKA_AUTO_UPDATE') && !KLICENKA_AUTO_UPDATE) {
+        return new WP_Error('disabled', 'Aktualizace jsou na tomto webu vypnuté.');
+    }
+    $manifest = klicenka_update_manifest();
+    if (is_wp_error($manifest)) {
+        return $manifest;
+    }
+    $cfg = klicenka_config();
+    $dir = __DIR__;
+    $allowed = klicenka_update_allowed();
+    $out = array('version' => (string) $manifest['version'], 'updated' => array(), 'unchanged' => array());
+    $staged = array();
+    foreach ($manifest['files'] as $f) {
+        $name = isset($f['name']) ? (string) $f['name'] : '';
+        if (!in_array($name, $allowed, true) || empty($f['sha256'])) {
+            continue;
+        }
+        $path = $dir . '/' . $name;
+        $present = file_exists($path);
+        if (!$present && !in_array($name, (array) $install, true)) {
+            continue;
+        }
+        if ($present && hash_file('sha256', $path) === $f['sha256']) {
+            $out['unchanged'][] = $name;
+            continue;
+        }
+        $res = wp_remote_get($cfg['issuer'] . '/api/klicenka/wordpress/file/' . rawurlencode($name), array('timeout' => 15, 'redirection' => 0));
+        $code = is_wp_error($res) ? '' : wp_remote_retrieve_body($res);
+        if ($code === '' || hash('sha256', $code) !== $f['sha256']) {
+            return new WP_Error('download', sprintf('Soubor %s se nepodařilo stáhnout nebo nesedí jeho otisk.', $name));
+        }
+        // Syntaktická chyba v mu-pluginu by shodila celý web: nejdřív zkontrolovat.
+        try {
+            token_get_all($code, TOKEN_PARSE);
+        } catch (\ParseError $e) {
+            return new WP_Error('syntax', sprintf('Soubor %s má chybu syntaxe, aktualizace zrušena.', $name));
+        }
+        $staged[$name] = $code;
+    }
+    // Zapsat až po kontrole všech souborů; každý přes dočasný soubor a přejmenování.
+    foreach ($staged as $name => $code) {
+        $path = $dir . '/' . $name;
+        $tmp = $path . '.new';
+        if (@file_put_contents($tmp, $code, LOCK_EX) === false) {
+            return new WP_Error('write', sprintf('Do adresáře mu-plugins nejde zapisovat (%s).', $name));
+        }
+        if (file_exists($path)) {
+            @copy($path, $path . '.prev');
+        }
+        if (!@rename($tmp, $path)) {
+            @unlink($tmp);
+            return new WP_Error('write', sprintf('Soubor %s se nepodařilo nahradit.', $name));
+        }
+        $out['updated'][] = $name;
+    }
+    if (function_exists('opcache_reset')) {
+        @opcache_reset();
+    }
+    update_option('klicenka_last_update', array('time' => gmdate('c'), 'result' => $out), false);
+    error_log('[klicenka] update ' . wp_json_encode($out));
+    return $out;
+}
+
+/** Denní kontrola (WP cron). Nikdy nehází: neúspěch jen do logu. */
+add_action('klicenka_update_daily', function () {
+    $r = klicenka_update_run();
+    if (is_wp_error($r)) {
+        error_log('[klicenka] update failed: ' . $r->get_error_code());
+    }
+});
+add_action('init', function () {
+    if (!wp_next_scheduled('klicenka_update_daily')) {
+        wp_schedule_event(time() + wp_rand(60, 6 * 3600), 'daily', 'klicenka_update_daily');
+    }
+});
+
+/**
+ * Aktualizace hned, na kliknutí v trackeru: POST admin-ajax.php?action=klicenka_update, pole "token"
+ * (typ klicenka-update+jwt, 60 s, jednorázový, adresát tento web). Claim "install" = soubory k přidání.
+ */
+function klicenka_update_now()
+{
+    nocache_headers();
+    $payload = klicenka_verify(isset($_POST['token']) ? wp_unslash($_POST['token']) : '', array('typ' => 'klicenka-update+jwt', 'max_ttl' => 60, 'single_use' => true));
+    if (is_wp_error($payload)) {
+        wp_send_json(array('ok' => false, 'error' => $payload->get_error_code()), 401);
+    }
+    $install = isset($payload['install']) && is_array($payload['install']) ? array_values(array_intersect($payload['install'], klicenka_update_allowed())) : array();
+    $r = klicenka_update_run($install);
+    if (is_wp_error($r)) {
+        wp_send_json(array('ok' => false, 'error' => $r->get_error_code(), 'message' => $r->get_error_message()), 500);
+    }
+    wp_send_json(array('ok' => true) + $r);
+}
+add_action('wp_ajax_nopriv_klicenka_update', 'klicenka_update_now');
+add_action('wp_ajax_klicenka_update', 'klicenka_update_now');
