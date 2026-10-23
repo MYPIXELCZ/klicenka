@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.4.0
+ * Version: 1.4.1
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -25,7 +25,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.4.0');
+define('KLICENKA_PLUGIN_VERSION', '1.4.1');
 
 function klicenka_config()
 {
@@ -307,7 +307,7 @@ add_action('wp_ajax_klicenka_status', 'klicenka_status');
 /** Soubory, které smí aktualizace měnit (jen v adresáři tohoto mu-pluginu). */
 function klicenka_update_allowed()
 {
-    return array('klicenka.php', 'klicenka-upravy.php');
+    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php');
 }
 
 /** Podepsaný manifest z trackeru: {payload: base64url(JSON), kid, sig}. Vrací ověřený obsah, nebo WP_Error. */
@@ -352,6 +352,9 @@ function klicenka_update_run($install = array())
 {
     if (defined('KLICENKA_AUTO_UPDATE') && !KLICENKA_AUTO_UPDATE) {
         return new WP_Error('disabled', 'Aktualizace jsou na tomto webu vypnuté.');
+    }
+    if (!function_exists('token_get_all')) {
+        return new WP_Error('config', 'Server nemá rozšíření tokenizer (kontrola syntaxe), aktualizace vypnutá.');
     }
     $manifest = klicenka_update_manifest();
     if (is_wp_error($manifest)) {

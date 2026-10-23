@@ -122,7 +122,7 @@ try {
 
   console.log("\nStav a tokeny");
   const s = await call("GET", "/status");
-  check("status bez tokenu: verze a klicenka 1.3.0", s.json?.name === "klicenka-upravy" && s.json?.klicenka === "1.3.0", s.json);
+  check("status bez tokenu: verze a klicenka", s.json?.name === "klicenka-upravy" && s.json?.klicenka === fs.readFileSync(klicenkaPhp, "utf8").match(/Version:\s*([\d.]+)/)[1], s.json);
   if (withElementor) check("Elementor běží", s.json?.elementor === true, s.json);
   check("bez tokenu 401", (await call("GET", "/pages")).status === 401);
   check("přihlašovací token Klíčenky (typ klicenka+jwt) 401", (await call("GET", "/pages", { token: sign({}, { typ: "klicenka+jwt", ttl: 60 }) })).status === 401);
