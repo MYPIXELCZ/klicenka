@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.3.0
+ * Version: 0.4.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -25,7 +25,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.3.0');
+define('KLICENKA_UPRAVY_VERSION', '0.4.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -589,7 +589,38 @@ function klicenka_upravy_page_info($post)
         'editor'   => klicenka_upravy_editor($post),
         'template' => (string) get_post_meta($post->ID, '_wp_page_template', true),
         'parent'   => (int) $post->post_parent,
-    ) + klicenka_upravy_template_info($post);
+    ) + klicenka_upravy_lang_info($post) + klicenka_upravy_template_info($post);
+}
+
+/**
+ * Vícejazyčný web (Polylang, WPML): jazyk položky a id jejích překladů (stejné místo v jiném jazyce,
+ * např. německá patička). Bez vícejazyčného pluginu prázdné.
+ */
+function klicenka_upravy_lang_info($post)
+{
+    if (function_exists('pll_get_post_language')) {
+        $lang = pll_get_post_language($post->ID);
+        $tr = function_exists('pll_get_post_translations') ? pll_get_post_translations($post->ID) : array();
+        unset($tr[$lang]);
+        return $lang ? array('lang' => $lang, 'translations' => array_map('intval', (array) $tr)) : array();
+    }
+    if (has_filter('wpml_post_language_details')) {
+        $d = apply_filters('wpml_post_language_details', null, $post->ID);
+        $lang = is_array($d) && !empty($d['language_code']) ? $d['language_code'] : null;
+        if (!$lang) {
+            return array();
+        }
+        $trid = apply_filters('wpml_element_trid', null, $post->ID, 'post_' . $post->post_type);
+        $all = $trid ? apply_filters('wpml_get_element_translations', null, $trid, 'post_' . $post->post_type) : array();
+        $tr = array();
+        foreach ((array) $all as $code => $t) {
+            if ($code !== $lang && !empty($t->element_id)) {
+                $tr[$code] = (int) $t->element_id;
+            }
+        }
+        return array('lang' => $lang, 'translations' => $tr);
+    }
+    return array();
 }
 
 /** U šablony Elementoru: typ (header, footer, popup, section, kit…), podmínky zobrazení a jestli je aktivní kit. */
@@ -627,6 +658,9 @@ function klicenka_upravy_rest_pages(WP_REST_Request $request)
         'order'          => $types === array('post') ? 'DESC' : 'ASC',
         'meta_query'     => array(array('key' => '_klicenka_upravy_source', 'compare' => 'NOT EXISTS')),
         'no_found_rows'  => false,
+        // Všechny jazyky: Polylang filtruje podle jazyka, '' = bez filtru; WPML vypne suppress_filters.
+        'lang'           => '',
+        'suppress_filters' => true,
     ));
     $pages = array_map('klicenka_upravy_page_info', $q->posts);
     klicenka_upravy_log('pages', klicenka_upravy_payload(), array('count' => count($pages)));
@@ -926,7 +960,16 @@ function klicenka_upravy_rest_preview(WP_REST_Request $request)
         // Šablona (hlavička, patička, pop-up, kit) se ukáže na skutečné stránce místo originálu. ?path=/kontakt/ = jiná stránka.
         $path = '/' . ltrim((string) $request->get_param('path'), '/');
         $path = preg_match('#^/[A-Za-z0-9/_.%-]*$#', $path) ? $path : '/';
-        $url = add_query_arg(array('klicenka_sablona' => $draft->ID, 'klicenka_nahled' => $param), home_url($path));
+        $base = home_url($path);
+        // Šablona v jiném jazyce (Polylang): náhled na domovské stránce toho jazyka, pokud cesta není zadaná.
+        $src = (int) get_post_meta($draft->ID, '_klicenka_upravy_source', true);
+        if ($path === '/' && $src && function_exists('pll_get_post_language') && function_exists('pll_home_url')) {
+            $lang = pll_get_post_language($src);
+            if ($lang) {
+                $base = pll_home_url($lang);
+            }
+        }
+        $url = add_query_arg(array('klicenka_sablona' => $draft->ID, 'klicenka_nahled' => $param), $base);
     } else {
         $key = $draft->post_type === 'page' ? 'page_id' : 'p';
         $url = add_query_arg(array($key => $draft->ID, 'klicenka_nahled' => $param), home_url('/'));
@@ -1010,9 +1053,10 @@ add_action('init', function () {
     }
     list($draft, $orig) = $t;
     // Elementor Pro vybírá šablony pro hlavičku, patičku, pop-upy… podle podmínek; tady jen vymění originál za koncept.
+    // Až po Polylangu/WPML (ty tu šablonu přeloží do jazyka stránky), pak teprve výměna za koncept.
     add_filter('elementor/theme/get_location_templates/template_id', function ($id) use ($draft, $orig) {
         return (int) $id === $orig ? $draft : $id;
-    });
+    }, 999);
     // Kdyby Elementor kontroloval stav: koncept se v tomto požadavku tváří jako zveřejněný (jen filtr, nic se neukládá).
     add_filter('get_post_status', function ($status, $post) use ($draft) {
         return (int) $post->ID === $draft ? 'publish' : $status;

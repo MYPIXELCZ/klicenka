@@ -65,6 +65,8 @@ const steps = [
   { step: "setSiteOptions", options: { permalink_structure: "/%postname%/" } },
 ];
 if (withElementor) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "elementor" }, options: { activate: true } });
+const withPolylang = !!process.env.WITH_POLYLANG;
+if (withPolylang) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "polylang" }, options: { activate: true } });
 fs.writeFileSync(path.join(tmp, "blueprint.json"), JSON.stringify({ steps, features: { networking: true } }, null, 2));
 
 const wpLog = fs.openSync(path.join(tmp, "playground.log"), "a");
@@ -359,6 +361,18 @@ try {
     } else {
       check("Elementor má aktivní kit", false, stT);
     }
+  }
+
+  // ---------- Vícejazyčný web (Polylang) ----------
+  if (withPolylang) {
+    console.log("\nPolylang");
+    await fetch(`${WP}/`); // init založí jazyky a překlad
+    const stP = await helper("/state");
+    const DE = stP.pages["Test Elementor DE"];
+    const all = await call("GET", "/pages&type=page", { token: sign({ req: "r7" }) });
+    const cs = all.json?.pages?.find((x) => x.id === EL), de = all.json?.pages?.find((x) => x.id === DE);
+    check("seznam obsahuje oba jazyky", !!cs && !!de, all.json?.pages?.map((x) => [x.id, x.title, x.lang]));
+    check("jazyk a překlady u stránky", cs?.lang === "cs" && cs?.translations?.de === DE && de?.translations?.cs === EL, { cs, de });
   }
 
   // ---------- Klíčenka 1.3.0: přihlášení beze změny ----------

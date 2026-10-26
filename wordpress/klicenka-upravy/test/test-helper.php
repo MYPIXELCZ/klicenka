@@ -64,6 +64,33 @@ add_action('init', function () {
     ))));
 });
 
+// Polylang (jen když běží): čeština a němčina, německá kopie stránky Test Elementor propojená jako překlad.
+add_action('init', function () {
+    if (!function_exists('pll_set_post_language') || get_option('kut_pll') || !get_option('kut_fixtures')) {
+        return;
+    }
+    update_option('kut_pll', 1);
+    $model = PLL()->model;
+    foreach (array(array('Čeština', 'cs', 'cs_CZ'), array('Deutsch', 'de', 'de_DE')) as $i => $l) {
+        $args = array('name' => $l[0], 'slug' => $l[1], 'locale' => $l[2], 'rtl' => 0, 'term_group' => $i, 'flag' => '');
+        if (isset($model->languages) && method_exists($model->languages, 'add')) {
+            $model->languages->add($args);
+        } else {
+            $model->add_language($args);
+        }
+    }
+    if (method_exists($model, 'clean_languages_cache')) {
+        $model->clean_languages_cache();
+    }
+    $cs = get_page_by_title('Test Elementor', OBJECT, 'page');
+    $de = wp_insert_post(array('post_type' => 'page', 'post_status' => 'publish', 'post_title' => 'Test Elementor DE', 'post_content' => '<p>de</p>', 'post_author' => 1));
+    update_post_meta($de, '_elementor_edit_mode', 'builder');
+    update_post_meta($de, '_elementor_data', wp_slash(wp_json_encode(kut_elementor_fixture())));
+    pll_set_post_language($cs->ID, 'cs');
+    pll_set_post_language($de, 'de');
+    pll_save_post_translations(array('cs' => $cs->ID, 'de' => $de));
+}, 20);
+
 add_action('rest_api_init', function () {
     register_rest_route('kut/v1', '/inspect', array('methods' => 'GET', 'permission_callback' => '__return_true', 'callback' => function ($r) {
         global $wpdb;
