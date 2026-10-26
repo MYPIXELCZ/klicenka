@@ -61,7 +61,7 @@ fs.copyFileSync(klicenkaPhp, path.join(mu, "klicenka.php"));
 fs.copyFileSync(path.join(pluginDir, "klicenka-upravy.php"), path.join(mu, "klicenka-upravy.php"));
 fs.copyFileSync(path.join(here, "test-helper.php"), path.join(mu, "zz-test-helper.php"));
 const steps = [
-  { step: "defineWpConfigConsts", consts: { KLICENKA_AUDIENCE: "example-wordpress", KLICENKA_ENVIRONMENT: "local", KLICENKA_ISSUER: ISSUER, KLICENKA_UPRAVY_MAX_UPLOAD: 300000 } },
+  { step: "defineWpConfigConsts", consts: { KLICENKA_AUDIENCE: "example-wordpress", KLICENKA_ENVIRONMENT: "local", KLICENKA_ISSUER: ISSUER, KLICENKA_UPRAVY_MAX_UPLOAD: 300000, KLICENKA_UPRAVY_MAX_PDF: 600000 } },
   { step: "setSiteOptions", options: { permalink_structure: "/%postname%/" } },
 ];
 if (withElementor) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "elementor" }, options: { activate: true } });
@@ -208,6 +208,13 @@ try {
   check("upload textu jako .png 415", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.from("<?php echo 1;"), "x.png", "image/png") })).status === 415);
   check("upload SVG 415", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), "x.svg", "image/svg+xml") })).status === 415);
   check("upload nad limit 413", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.concat([png, Buffer.alloc(310000)]), "big.png", "image/png") })).status === 413);
+  const pdf = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+  const upPdf = await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(pdf, "cenik-2026.pdf", "application/pdf") });
+  check("upload PDF 200", upPdf.status === 200 && upPdf.json?.id > 0 && upPdf.json.mime === "application/pdf" && /\.pdf$/.test(upPdf.json.url), upPdf.json);
+  check("PDF nad obrázkový limit, pod PDF limitem 200", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.concat([pdf, Buffer.alloc(400000)]), "velky.pdf", "application/pdf") })).status === 200);
+  check("PDF nad limit 413", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.concat([pdf, Buffer.alloc(700000)]), "obri.pdf", "application/pdf") })).status === 413);
+  check("PHP jako .pdf 415", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.from("<?php echo 1;"), "x.pdf", "application/pdf") })).status === 415);
+  check("PDF přejmenované na .png 415", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(pdf, "x.png", "image/png") })).status === 415);
   check("upload ke konceptu jiného req 404", (await call("POST", `/drafts/${D}/media`, { token: T({ req: "r2" }), form: fd(png, "foto.png", "image/png") })).status === 404);
   await call("PATCH", `/drafts/${D}/elements`, { token: T(), body: [{ id: "img1", settings: { image: { id: up.json.id, url: up.json.url } } }] });
 

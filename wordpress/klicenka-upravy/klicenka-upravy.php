@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.1.0
+ * Version: 0.2.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.1.0');
+define('KLICENKA_UPRAVY_VERSION', '0.2.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -49,6 +49,12 @@ function klicenka_upravy_post_types()
 function klicenka_upravy_max_upload()
 {
     return defined('KLICENKA_UPRAVY_MAX_UPLOAD') ? (int) KLICENKA_UPRAVY_MAX_UPLOAD : 5 * 1024 * 1024;
+}
+
+/** PDF (ceníky, menu, dokumenty) smí být větší než obrázek. */
+function klicenka_upravy_max_pdf()
+{
+    return defined('KLICENKA_UPRAVY_MAX_PDF') ? (int) KLICENKA_UPRAVY_MAX_PDF : 30 * 1024 * 1024;
 }
 
 /** Meta, která se nekopírují: technické zámky, cache Elementoru, naše vlastní a koš. */
@@ -800,17 +806,24 @@ function klicenka_upravy_rest_media(WP_REST_Request $request)
         if ($err === UPLOAD_ERR_INI_SIZE || $err === UPLOAD_ERR_FORM_SIZE) {
             return klicenka_upravy_error('too_large', 'Soubor je příliš velký.', 413);
         }
-        return klicenka_upravy_error('invalid', 'Pošlete obrázek jako multipart pole „file“.', 400);
+        return klicenka_upravy_error('invalid', 'Pošlete soubor jako multipart pole „file“.', 400);
     }
     $file = $files['file'];
-    if ((int) $file['size'] > klicenka_upravy_max_upload() || filesize($file['tmp_name']) > klicenka_upravy_max_upload()) {
-        return klicenka_upravy_error('too_large', sprintf('Obrázek může mít nejvýš %d kB.', klicenka_upravy_max_upload() / 1024), 413);
+    // PDF jen jako nový soubor v knihovně médií (nic se nepřepisuje); na živém webu se objeví až s publikací konceptu,
+    // který na něj odkazuje. Pozná se podle hlavičky %PDF-, ne podle přípony.
+    $head = (string) @file_get_contents($file['tmp_name'], false, null, 0, 5);
+    $is_pdf = $head === '%PDF-';
+    $max = $is_pdf ? klicenka_upravy_max_pdf() : klicenka_upravy_max_upload();
+    if ((int) $file['size'] > $max || filesize($file['tmp_name']) > $max) {
+        return klicenka_upravy_error('too_large', sprintf('Soubor může mít nejvýš %d kB.', $max / 1024), 413);
     }
-    $allowed = array('jpg|jpeg|jpe' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp');
+    $allowed = $is_pdf
+        ? array('pdf' => 'application/pdf')
+        : array('jpg|jpeg|jpe' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp');
     $check = wp_check_filetype_and_ext($file['tmp_name'], $file['name'], $allowed);
-    $info = @getimagesize($file['tmp_name']);
-    if (empty($check['type']) || !in_array($check['type'], $allowed, true) || !$info || !in_array($info['mime'], $allowed, true)) {
-        return klicenka_upravy_error('unsupported', 'Povolené jsou jen obrázky JPEG, PNG, GIF a WebP.', 415);
+    $info = $is_pdf ? null : @getimagesize($file['tmp_name']);
+    if (empty($check['type']) || !in_array($check['type'], $allowed, true) || (!$is_pdf && (!$info || !in_array($info['mime'], $allowed, true)))) {
+        return klicenka_upravy_error('unsupported', 'Povolené jsou jen obrázky JPEG, PNG, GIF, WebP a PDF.', 415);
     }
     require_once ABSPATH . 'wp-admin/includes/file.php';
     require_once ABSPATH . 'wp-admin/includes/media.php';
@@ -823,7 +836,7 @@ function klicenka_upravy_rest_media(WP_REST_Request $request)
     $att = media_handle_sideload($sideload, $draft->ID, null, array('post_author' => get_current_user_id()));
     remove_filter('upload_mimes', $mimes, 99);
     if (is_wp_error($att)) {
-        return klicenka_upravy_error('failed', 'Obrázek se nepodařilo uložit: ' . $att->get_error_message(), 500);
+        return klicenka_upravy_error('failed', 'Soubor se nepodařilo uložit: ' . $att->get_error_message(), 500);
     }
     $alt = $request->get_param('alt');
     if (is_string($alt) && $alt !== '') {
@@ -834,8 +847,8 @@ function klicenka_upravy_rest_media(WP_REST_Request $request)
     return rest_ensure_response(array(
         'id'     => (int) $att,
         'url'    => wp_get_attachment_url($att),
-        'width'  => isset($meta['width']) ? (int) $meta['width'] : (int) $info[0],
-        'height' => isset($meta['height']) ? (int) $meta['height'] : (int) $info[1],
+        'width'  => isset($meta['width']) ? (int) $meta['width'] : ($info ? (int) $info[0] : null),
+        'height' => isset($meta['height']) ? (int) $meta['height'] : ($info ? (int) $info[1] : null),
         'mime'   => $check['type'],
     ));
 }
