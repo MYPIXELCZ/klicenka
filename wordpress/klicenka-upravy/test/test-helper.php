@@ -48,6 +48,20 @@ add_action('init', function () {
     $g = wp_insert_post(wp_slash(array('post_type' => 'page', 'post_status' => 'publish', 'post_title' => 'Test Gutenberg', 'post_content' => $gb, 'post_author' => 1)));
     kses_init();
     wp_insert_post(array('post_type' => 'page', 'post_status' => 'publish', 'post_title' => 'Cizí stránka', 'post_content' => '<p>Nesahat</p>', 'post_author' => 1));
+
+    // Šablona patičky (Elementor Pro Theme Builder) s podmínkou zobrazení na celém webu.
+    $f = wp_insert_post(array('post_type' => 'elementor_library', 'post_status' => 'publish', 'post_title' => 'Test Patička', 'post_content' => '', 'post_author' => 1));
+    update_post_meta($f, '_elementor_edit_mode', 'builder');
+    update_post_meta($f, '_elementor_template_type', 'footer');
+    update_post_meta($f, '_elementor_conditions', array('include/general'));
+    update_post_meta($f, '_elementor_data', wp_slash(wp_json_encode(array(
+        array('id' => 'fsec', 'elType' => 'section', 'settings' => array(), 'elements' => array(
+            array('id' => 'fcol', 'elType' => 'column', 'settings' => array('_column_size' => 100), 'elements' => array(
+                array('id' => 'ftext', 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => array('editor' => '<p>Ceník 2025</p>'), 'elements' => array()),
+                array('id' => 'fbtn', 'elType' => 'widget', 'widgetType' => 'button', 'settings' => array('text' => 'Stáhnout ceník', 'link' => array('url' => 'https://example.test/cenik-2025.pdf')), 'elements' => array()),
+            )),
+        )),
+    ))));
 });
 
 add_action('rest_api_init', function () {
@@ -78,7 +92,7 @@ add_action('rest_api_init', function () {
             $login = is_wp_error($res) ? $res->get_error_code() : 'PRIHLASEN';
         }
         $pages = array();
-        foreach (get_posts(array('post_type' => 'page', 'post_status' => 'any', 'numberposts' => -1)) as $p) {
+        foreach (get_posts(array('post_type' => array('page', 'elementor_library'), 'post_status' => 'any', 'numberposts' => -1)) as $p) {
             $pages[$p->post_title] = $p->ID;
         }
         return array(
@@ -88,6 +102,7 @@ add_action('rest_api_init', function () {
             'log'        => get_option('klicenka_upravy_log', array()),
             'pages'      => $pages,
             'elementor'  => defined('ELEMENTOR_VERSION') ? ELEMENTOR_VERSION : null,
+            'kit'        => (int) get_option('elementor_active_kit'),
         );
     }));
     register_rest_route('kut/v1', '/touch', array('methods' => 'POST', 'permission_callback' => '__return_true', 'callback' => function ($r) {

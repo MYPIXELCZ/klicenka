@@ -310,6 +310,57 @@ try {
   const grb = await call("POST", `/pages/${GB}/rollback`, { token: G({ scope: "publish" }) });
   check("rollback 200 a obsah původní", grb.status === 200 && (await helper(`/inspect&post=${GB}`)).post.content === gTouched.post.content, grb.json);
 
+  // ---------- Šablony Elementoru (patička) a kit ----------
+  if (withElementor) {
+    console.log("\nŠablony Elementoru");
+    const stT = await helper("/state");
+    const FOOT = stT.pages["Test Patička"], KIT = stT.kit;
+    const lib = await call("GET", "/pages&type=elementor_library", { token: sign({ req: "r5" }) });
+    const footInfo = lib.json?.pages?.find((x) => x.id === FOOT);
+    check("seznam šablon: patička s typem a podmínkou", footInfo?.template_type === "footer" && footInfo.conditions?.[0] === "include/general", lib.json);
+    check("nepovolený typ v seznamu 400", (await call("GET", "/pages&type=attachment", { token: sign({ req: "r5" }) })).status === 400);
+    const TF = (c = {}) => sign({ req: "r5", post: FOOT, ...c });
+    const fd1 = await call("POST", `/pages/${FOOT}/duplicate`, { token: TF() });
+    const FD = fd1.json?.id;
+    const fdMeta = (await helper(`/inspect&post=${FD}`)).meta;
+    check("koncept patičky bez podmínek zobrazení, s typem", fd1.status === 200 && !("_elementor_conditions" in fdMeta) && fdMeta._elementor_template_type === "footer", fdMeta);
+    const fOrig = await helper(`/inspect&post=${FOOT}`);
+    const fp = await call("PATCH", `/drafts/${FD}/elements`, { token: TF(), body: [{ id: "ftext", settings: { editor: "<p>Ceník 2026/27</p>" } }, { id: "fbtn", settings: { link: { url: "https://example.test/cenik-2026-27.pdf" } } }] });
+    check("úprava konceptu patičky 200", fp.status === 200, fp.json);
+    check("originál patičky zatím beze změny", (await helper(`/inspect&post=${FOOT}`)).meta._elementor_data === fOrig.meta._elementor_data);
+    const fpub = await call("POST", `/drafts/${FD}/publish`, { token: sign({ scope: "publish", req: "r5", post: FOOT }, { ttl: 60 }) });
+    const fAfter = await helper(`/inspect&post=${FOOT}`);
+    check("publikace patičky: nový text a odkaz", fpub.status === 200 && fAfter.meta._elementor_data.includes("2026\\/27") && fAfter.meta._elementor_data.includes("cenik-2026-27.pdf"), fAfter.meta._elementor_data);
+    check("publikace nesáhla na podmínky zobrazení", fAfter.meta._elementor_conditions === fOrig.meta._elementor_conditions, fAfter.meta._elementor_conditions);
+    const frb = await call("POST", `/pages/${FOOT}/rollback`, { token: sign({ scope: "publish", req: "r5", post: FOOT }, { ttl: 60 }) });
+    const fBack = await helper(`/inspect&post=${FOOT}`);
+    check("návrat patičky: původní obsah, podmínky zůstaly", frb.status === 200 && fBack.meta._elementor_data === fOrig.meta._elementor_data && fBack.meta._elementor_conditions === fOrig.meta._elementor_conditions, frb.json);
+
+    if (KIT) {
+      const TK = (c = {}) => sign({ req: "r6", post: KIT, ...c });
+      const kd = await call("POST", `/pages/${KIT}/duplicate`, { token: TK() });
+      const KD = kd.json?.id;
+      check("koncept kitu 200", kd.status === 200 && KD > 0, kd.json);
+      const kp = await call("PATCH", `/drafts/${KD}/elements`, { token: TK(), body: [{ id: "@page", settings: { kut_barva: "#ff0000" } }] });
+      const ko = await call("GET", `/drafts/${KD}/outline&ids=@page`, { token: TK() });
+      check("nastavení kitu (@page) se uloží do konceptu", kp.status === 200 && ko.json?.page_settings?.kut_barva === "#ff0000", ko.json);
+      check("originální kit zatím beze změny", !String((await helper(`/inspect&post=${KIT}`)).meta._elementor_page_settings ?? "").includes("kut_barva"));
+      const kl = await call("GET", `/drafts/${KD}/preview-link`, { token: TK() });
+      const html = await (await fetch(kl.json.url)).text();
+      check("náhled kitu: stránka s konceptem kitu a štítkem náhledu", /klicenka_sablona=/.test(kl.json.url) && html.includes(`elementor-kit-${KD}`) && html.includes("Náhled konceptu šablony"), { url: kl.json.url, banner: html.includes("Náhled konceptu šablony"), kits: html.match(/elementor-kit-\d+/g) });
+      const plain = await (await fetch(`${WP}/`)).text();
+      check("bez podpisu web normálně (původní kit, bez štítku)", plain.includes(`elementor-kit-${KIT}`) && !plain.includes("Náhled konceptu šablony"));
+      const forged = await (await fetch(kl.json.url.replace(/klicenka_nahled=(\d+)\.[a-f0-9]{4}/, "klicenka_nahled=$1.0000"))).text();
+      check("podvržený podpis náhledu se nepoužije", !forged.includes(`elementor-kit-${KD}`));
+      const kpub = await call("POST", `/drafts/${KD}/publish`, { token: sign({ scope: "publish", req: "r6", post: KIT }, { ttl: 60 }) });
+      check("publikace kitu: nastavení v originálu", kpub.status === 200 && String((await helper(`/inspect&post=${KIT}`)).meta._elementor_page_settings).includes("kut_barva"), { status: kpub.status, json: kpub.json, patch: kp.status });
+      const krb = await call("POST", `/pages/${KIT}/rollback`, { token: sign({ scope: "publish", req: "r6", post: KIT }, { ttl: 60 }) });
+      check("návrat kitu: nastavení zpět", krb.status === 200 && !String((await helper(`/inspect&post=${KIT}`)).meta._elementor_page_settings ?? "").includes("kut_barva"), krb.json);
+    } else {
+      check("Elementor má aktivní kit", false, stT);
+    }
+  }
+
   // ---------- Klíčenka 1.3.0: přihlášení beze změny ----------
   console.log("\nKlíčenka přihlášení (zpětná kompatibilita)");
   const login = (tok) => fetch(`${WP}/wp-login.php?action=klicenka`, { method: "POST", body: new URLSearchParams({ token: tok }), redirect: "manual" });

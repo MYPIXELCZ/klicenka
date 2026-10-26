@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.2.0
+ * Version: 0.3.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -10,7 +10,11 @@
  * Konfigurace je stejná jako u Klíčenky (KLICENKA_AUDIENCE, KLICENKA_ENVIRONMENT, KLICENKA_ISSUER).
  * Volitelně:
  *   define('KLICENKA_UPRAVY_MAX_UPLOAD', 5 * 1024 * 1024);   // největší obrázek v bajtech
- *   define('KLICENKA_UPRAVY_POST_TYPES', 'page');            // čárkou oddělené typy obsahu
+ *   define('KLICENKA_UPRAVY_POST_TYPES', 'page,post,elementor_library'); // čárkou oddělené typy obsahu
+ *
+ * Šablony Elementoru (hlavička, patička, pop-up, sekce, kit) se upravují stejně jako stránky: kopie jako koncept,
+ * publikace jen z trackeru, záloha a návrat. Podmínky zobrazení šablon (_elementor_conditions) se nekopírují ani nemění,
+ * koncept šablony se proto na webu nikdy neuplatní; náhled ho na stránce vymění jen pro požadavek s podepsaným odkazem.
  *
  * Token: hlavička typ "klicenka-upravy+jwt", claimy jako u Klíčenky (iss, aud, sub, act, jti, iat, exp)
  * a navíc scope (drafts | publish), req (id požadavku) a post (id originální stránky).
@@ -21,7 +25,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.2.0');
+define('KLICENKA_UPRAVY_VERSION', '0.3.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -42,7 +46,7 @@ function klicenka_upravy_error($code, $message, $status)
 
 function klicenka_upravy_post_types()
 {
-    $types = defined('KLICENKA_UPRAVY_POST_TYPES') ? KLICENKA_UPRAVY_POST_TYPES : 'page';
+    $types = defined('KLICENKA_UPRAVY_POST_TYPES') ? KLICENKA_UPRAVY_POST_TYPES : 'page,post,elementor_library';
     return array_values(array_filter(array_map('trim', explode(',', (string) $types))));
 }
 
@@ -57,12 +61,15 @@ function klicenka_upravy_max_pdf()
     return defined('KLICENKA_UPRAVY_MAX_PDF') ? (int) KLICENKA_UPRAVY_MAX_PDF : 30 * 1024 * 1024;
 }
 
-/** Meta, která se nekopírují: technické zámky, cache Elementoru, naše vlastní a koš. */
+/**
+ * Meta, která se nekopírují ani nepřepisují: technické zámky, cache Elementoru, naše vlastní, koš
+ * a podmínky zobrazení šablon (kde se hlavička/patička/pop-up ukazuje); ty mění jen člověk v Elementoru.
+ */
 function klicenka_upravy_skip_meta($key)
 {
     static $exact = array('_edit_lock', '_edit_last', '_wp_old_slug', '_wp_old_date', '_wp_desired_post_slug',
         '_wp_trash_meta_status', '_wp_trash_meta_time', '_elementor_css', '_elementor_element_cache',
-        '_elementor_page_assets', '_encloseme', '_pingme');
+        '_elementor_page_assets', '_encloseme', '_pingme', '_elementor_conditions');
     return in_array($key, $exact, true) || strpos($key, '_klicenka_upravy_') === 0;
 }
 
@@ -582,19 +589,42 @@ function klicenka_upravy_page_info($post)
         'editor'   => klicenka_upravy_editor($post),
         'template' => (string) get_post_meta($post->ID, '_wp_page_template', true),
         'parent'   => (int) $post->post_parent,
+    ) + klicenka_upravy_template_info($post);
+}
+
+/** U šablony Elementoru: typ (header, footer, popup, section, kit…), podmínky zobrazení a jestli je aktivní kit. */
+function klicenka_upravy_template_info($post)
+{
+    if ($post->post_type !== 'elementor_library') {
+        return array();
+    }
+    $type = (string) get_post_meta($post->ID, '_elementor_template_type', true);
+    $conditions = get_post_meta($post->ID, '_elementor_conditions', true);
+    return array(
+        'template_type' => $type,
+        'conditions'    => is_array($conditions) ? array_values($conditions) : array(),
+        'active_kit'    => $type === 'kit' && (int) get_option('elementor_active_kit') === (int) $post->ID,
     );
 }
 
 function klicenka_upravy_rest_pages(WP_REST_Request $request)
 {
+    $types = klicenka_upravy_post_types();
+    $type = (string) $request->get_param('type');
+    if ($type !== '') {
+        if (!in_array($type, $types, true)) {
+            return klicenka_upravy_error('invalid', 'Typ obsahu není povolený.', 400);
+        }
+        $types = array($type);
+    }
     $q = new WP_Query(array(
-        'post_type'      => klicenka_upravy_post_types(),
+        'post_type'      => $types,
         'post_status'    => array('publish', 'private'),
         'posts_per_page' => 100,
         'paged'          => max(1, (int) $request->get_param('page')),
         's'              => (string) $request->get_param('search'),
-        'orderby'        => 'menu_order title',
-        'order'          => 'ASC',
+        'orderby'        => $types === array('post') ? 'date' : 'menu_order title',
+        'order'          => $types === array('post') ? 'DESC' : 'ASC',
         'meta_query'     => array(array('key' => '_klicenka_upravy_source', 'compare' => 'NOT EXISTS')),
         'no_found_rows'  => false,
     ));
@@ -660,7 +690,17 @@ function klicenka_upravy_rest_outline(WP_REST_Request $request)
     }
     $ids = array_filter(array_map('trim', explode(',', (string) $request->get_param('ids'))));
     $editor = klicenka_upravy_editor($draft);
-    $out = array('id' => $draft->ID, 'original' => (int) klicenka_upravy_payload()['post'], 'editor' => $editor);
+    $out = array('id' => $draft->ID, 'original' => (int) klicenka_upravy_payload()['post'], 'editor' => $editor) + klicenka_upravy_template_info($draft);
+    $page = get_post_meta($draft->ID, '_elementor_page_settings', true);
+    if (in_array('@page', $ids, true)) {
+        $out['page_settings'] = is_array($page) ? $page : (object) array();
+        $ids = array_values(array_diff($ids, array('@page')));
+        if (!$ids) {
+            return rest_ensure_response($out);
+        }
+    } elseif (is_array($page) && $page) {
+        $out['page_settings_keys'] = array_keys($page);
+    }
     if ($editor === 'elementor') {
         $data = klicenka_upravy_elementor_data($draft->ID);
         if ($ids) {
@@ -714,10 +754,23 @@ function klicenka_upravy_rest_elements(WP_REST_Request $request)
         }
         $clean[] = array('id' => (string) $c['id'], 'settings' => $s);
     }
+    // „@page“ = nastavení dokumentu Elementoru (_elementor_page_settings); u kitu globální barvy, písma a logo.
+    foreach ($clean as $k => $c) {
+        if ($c['id'] !== '@page') {
+            continue;
+        }
+        $cur = get_post_meta($draft->ID, '_elementor_page_settings', true);
+        update_post_meta($draft->ID, '_elementor_page_settings', klicenka_upravy_merge(is_array($cur) ? $cur : array(), $c['settings']));
+        klicenka_upravy_elementor_refresh($draft->ID);
+        unset($clean[$k]);
+    }
+    $clean = array_values($clean);
     $ids = array_column($clean, 'id');
     $editor = klicenka_upravy_editor($draft);
 
-    if ($editor === 'elementor') {
+    if (!$clean) {
+        // Jen nastavení dokumentu.
+    } elseif ($editor === 'elementor') {
         $data = klicenka_upravy_elementor_data($draft->ID);
         $found = array();
         klicenka_upravy_find_elements($data, $ids, $found);
@@ -787,8 +840,9 @@ function klicenka_upravy_rest_elements(WP_REST_Request $request)
             return klicenka_upravy_error('failed', 'Koncept se nepodařilo uložit.', 500);
         }
     }
-    klicenka_upravy_log('elements', klicenka_upravy_payload(), array('draft' => $draft->ID, 'ids' => array_slice($ids, 0, 50)));
-    return rest_ensure_response(array('id' => $draft->ID, 'updated' => array_values(array_unique($ids))));
+    $updated = array_column($changes, 'id');
+    klicenka_upravy_log('elements', klicenka_upravy_payload(), array('draft' => $draft->ID, 'ids' => array_slice($updated, 0, 50)));
+    return rest_ensure_response(array('id' => $draft->ID, 'updated' => array_values(array_unique(array_map('strval', $updated)))));
 }
 
 function klicenka_upravy_rest_media(WP_REST_Request $request)
@@ -868,8 +922,15 @@ function klicenka_upravy_rest_preview(WP_REST_Request $request)
     }
     $exp = time() + KLICENKA_UPRAVY_PREVIEW_TTL;
     $param = $exp . '.' . klicenka_upravy_preview_sig($draft->ID, $exp);
-    $key = $draft->post_type === 'page' ? 'page_id' : 'p';
-    $url = add_query_arg(array($key => $draft->ID, 'klicenka_nahled' => $param), home_url('/'));
+    if ($draft->post_type === 'elementor_library') {
+        // Šablona (hlavička, patička, pop-up, kit) se ukáže na skutečné stránce místo originálu. ?path=/kontakt/ = jiná stránka.
+        $path = '/' . ltrim((string) $request->get_param('path'), '/');
+        $path = preg_match('#^/[A-Za-z0-9/_.%-]*$#', $path) ? $path : '/';
+        $url = add_query_arg(array('klicenka_sablona' => $draft->ID, 'klicenka_nahled' => $param), home_url($path));
+    } else {
+        $key = $draft->post_type === 'page' ? 'page_id' : 'p';
+        $url = add_query_arg(array($key => $draft->ID, 'klicenka_nahled' => $param), home_url('/'));
+    }
     klicenka_upravy_log('preview-link', klicenka_upravy_payload(), array('draft' => $draft->ID));
     return rest_ensure_response(array('url' => $url, 'expires' => gmdate('c', $exp)));
 }
@@ -917,6 +978,94 @@ add_filter('posts_results', function ($posts, $q) {
     }
     return $posts;
 }, 10, 2);
+
+/** Platný náhled šablony (klicenka_sablona) → [id konceptu, id originálu], jinak null. */
+function klicenka_upravy_preview_template()
+{
+    static $res = false;
+    if ($res !== false) {
+        return $res;
+    }
+    $res = null;
+    $param = isset($_GET['klicenka_nahled']) ? (string) wp_unslash($_GET['klicenka_nahled']) : '';
+    $id = isset($_GET['klicenka_sablona']) ? (int) $_GET['klicenka_sablona'] : 0;
+    if ($param === '' || $id <= 0 || !preg_match('/^(\d{9,12})\.([a-f0-9]{64})$/', $param, $m)) {
+        return $res;
+    }
+    if ((int) $m[1] < time() || !hash_equals(klicenka_upravy_preview_sig($id, (int) $m[1]), $m[2])) {
+        return $res;
+    }
+    $post = get_post($id);
+    $source = $post ? (int) get_post_meta($id, '_klicenka_upravy_source', true) : 0;
+    if ($post && $post->post_status === 'draft' && $post->post_type === 'elementor_library' && $source > 0) {
+        $res = array($id, $source);
+    }
+    return $res;
+}
+
+add_action('init', function () {
+    $t = klicenka_upravy_preview_template();
+    if (!$t) {
+        return;
+    }
+    list($draft, $orig) = $t;
+    // Elementor Pro vybírá šablony pro hlavičku, patičku, pop-upy… podle podmínek; tady jen vymění originál za koncept.
+    add_filter('elementor/theme/get_location_templates/template_id', function ($id) use ($draft, $orig) {
+        return (int) $id === $orig ? $draft : $id;
+    });
+    // Kdyby Elementor kontroloval stav: koncept se v tomto požadavku tváří jako zveřejněný (jen filtr, nic se neukládá).
+    add_filter('get_post_status', function ($status, $post) use ($draft) {
+        return (int) $post->ID === $draft ? 'publish' : $status;
+    }, 10, 2);
+    // Kit (globální barvy, písma): Elementor bere jen zveřejněný kit, proto se CSS konceptu přidá navrch.
+    // Jeho pravidla platí pro třídu elementor-kit-<koncept>, kterou dostane body, a načtou se až po originálu.
+    if ((int) get_option('elementor_active_kit') === $orig) {
+        add_filter('body_class', function ($classes) use ($draft) {
+            $classes[] = 'elementor-kit-' . $draft;
+            return $classes;
+        });
+        add_action('wp_enqueue_scripts', function () use ($draft) {
+            if (class_exists('\\Elementor\\Core\\Files\\CSS\\Post')) {
+                \Elementor\Core\Files\CSS\Post::create($draft)->enqueue();
+            }
+        }, 999);
+    }
+    if (!defined('DONOTCACHEPAGE')) {
+        define('DONOTCACHEPAGE', true);
+    }
+    add_filter('wp_robots', 'wp_robots_no_robots');
+    add_action('send_headers', function () {
+        nocache_headers();
+        header('X-Robots-Tag: noindex, nofollow');
+        header('Referrer-Policy: no-referrer');
+        header('X-LiteSpeed-Cache-Control: no-cache');
+    });
+    add_action('wp_footer', function () use ($draft) {
+        echo '<div style="position:fixed;left:12px;bottom:12px;z-index:2147483647;background:#7c3aed;color:#fff;font:13px/1.4 system-ui,sans-serif;padding:6px 10px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.25)">Náhled konceptu šablony (' . esc_html(get_the_title($draft)) . '), na webu zatím není</div>';
+    });
+});
+
+/**
+ * Po publikaci nebo návratu šablony: CSS Elementoru a cache stránek celého webu (hlavička je na všech stránkách).
+ * Jen když to web má; nic jiného se nemění.
+ */
+function klicenka_upravy_purge_all()
+{
+    try {
+        if (did_action('elementor/loaded') && class_exists('\Elementor\Plugin') && isset(\Elementor\Plugin::$instance->files_manager)) {
+            \Elementor\Plugin::$instance->files_manager->clear_cache();
+        }
+    } catch (\Throwable $e) {
+        error_log('[klicenka-upravy] elementor cache: ' . $e->getMessage());
+    }
+    do_action('litespeed_purge_all');
+    if (function_exists('wp_cache_clear_cache')) {
+        wp_cache_clear_cache();
+    }
+    if (function_exists('rocket_clean_domain')) {
+        rocket_clean_domain();
+    }
+}
 
 /* ---------- Publikace a návrat ---------- */
 
@@ -1000,6 +1149,13 @@ function klicenka_upravy_rest_publish(WP_REST_Request $request)
         wp_update_post(array('ID' => $att, 'post_parent' => $orig->ID));
     }
     $css = klicenka_upravy_is_elementor($orig->ID) ? klicenka_upravy_elementor_refresh($orig->ID) : null;
+    if ($orig->post_type === 'elementor_library') {
+        klicenka_upravy_purge_all();
+    }
+    // Koncept kitu: Elementor by mazání kitu zastavil dotazem pro člověka; naše kopie přestane být kitem a jde do koše.
+    if (get_post_meta($draft->ID, '_elementor_template_type', true) === 'kit') {
+        update_post_meta($draft->ID, '_elementor_template_type', 'section');
+    }
     wp_trash_post($draft->ID);
     clean_post_cache($orig->ID);
     klicenka_upravy_log('publish', $p, array('draft' => $draft->ID, 'elementor_css' => $css));
@@ -1032,6 +1188,9 @@ function klicenka_upravy_rest_rollback(WP_REST_Request $request)
     }
     klicenka_upravy_store_backups($orig->ID, $backups);
     $css = klicenka_upravy_is_elementor($orig->ID) ? klicenka_upravy_elementor_refresh($orig->ID) : null;
+    if ($orig->post_type === 'elementor_library') {
+        klicenka_upravy_purge_all();
+    }
     klicenka_upravy_log('rollback', $p, array('backup_time' => $b['time']));
     return rest_ensure_response(array('restored' => $orig->ID, 'backup_time' => $b['time'], 'backups_left' => count($backups), 'elementor_css' => $css));
 }
