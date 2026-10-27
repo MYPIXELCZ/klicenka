@@ -19,6 +19,10 @@ seznam souborů podepsaný klíčem Klíčenky, ověří podpis, otisky SHA-256 
 (předchozí verze zůstane jako `.prev`). Novou verzi vydáš tak, že v trackeru spustíš `node scripts/klicenka-wp-sync.mjs`
 a nasadíš ho. Vypnutí na webu: `define('KLICENKA_AUTO_UPDATE', false);`.
 
+Nové soubory se na web přidávají jen na pokyn z trackeru (claim `install`), s jedinou výjimkou: od 1.6.0 se sám
+přidá `klicenka-overeni.php`, který jen vypíše značku `google-site-verification` z trackeru
+(`/api/gsc-overeni?host=…`), aby šel web ověřit a přidat do Search Console. Vypnutí: `define('KLICENKA_GSC_VERIFY', false);`.
+
 ## Verze
 
 Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verzí**:
@@ -27,7 +31,8 @@ Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verz
   tagy `vX.Y.Z` (např. `v1.2.0`). Zvyšuje se jen při změně kódu balíčku.
 - **WordPress mu-plugin** (`wordpress/klicenka/klicenka.php`) – verze v hlavičce `Version:`
   a v `KLICENKA_PLUGIN_VERSION`, tagy `wp-X.Y.Z` (např. `wp-1.4.1`).
-- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`) – každý má verzi ve své hlavičce, zatím bez tagů.
+- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`, `klicenka-udrzba`, `klicenka-overeni`) – každý má verzi
+  ve své hlavičce, zatím bez tagů.
 
 Číslo WordPress pluginu (1.4.x) tedy neznamená, že existuje npm verze 1.4.
 

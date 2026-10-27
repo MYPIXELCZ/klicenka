@@ -15,6 +15,8 @@ const NEW = fs.readFileSync(path.join(wp, "klicenka/klicenka.php"), "utf8");
 const UPRAVY = fs.readFileSync(path.join(wp, "klicenka-upravy/klicenka-upravy.php"), "utf8");
 const STAV = fs.readFileSync(path.join(wp, "klicenka-stav/klicenka-stav.php"), "utf8");
 const UDRZBA = fs.readFileSync(path.join(wp, "klicenka-udrzba/klicenka-udrzba.php"), "utf8");
+const OVERENI = fs.readFileSync(path.join(wp, "klicenka-overeni/klicenka-overeni.php"), "utf8");
+const GSC_TOKEN = "TestZnacka_1234-abcdEF";
 const NEW_VERSION = NEW.match(/Version:\s*([\d.]+)/)[1];
 // „Stará“ kopie = nová s jinou verzí v hlavičce (stará 1.2 by se sama aktualizovat neuměla).
 const OLD = NEW.replace(`define('KLICENKA_PLUGIN_VERSION', '${NEW_VERSION}')`, "define('KLICENKA_PLUGIN_VERSION', '1.4.0-old')");
@@ -26,7 +28,8 @@ const keep = process.argv.includes("--keep");
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const otherKey = crypto.generateKeyPairSync("ed25519").privateKey;
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "test1", alg: "EdDSA", use: "sig" };
-let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA };
+let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA, "klicenka-overeni.php": OVERENI };
+const gscHosts = [];
 let mode = "ok"; // ok | badsig | stale | badhash | syntax
 const sha = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 function manifest() {
@@ -41,6 +44,10 @@ function manifest() {
 const tracker = http.createServer((req, res) => {
   if (req.url === "/.well-known/jwks.json") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ keys: [jwk] }));
   if (req.url === "/api/klicenka/wordpress/manifest") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(manifest()));
+  if (req.url.startsWith("/api/gsc-overeni?")) {
+    gscHosts.push(new URL(req.url, ISSUER).searchParams.get("host"));
+    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ token: GSC_TOKEN }));
+  }
   const m = req.url.match(/^\/api\/klicenka\/wordpress\/file\/(.+)$/);
   if (m) {
     const name = decodeURIComponent(m[1]);
@@ -110,6 +117,13 @@ try {
   check("platná aktualizace: klicenka.php i klicenka-stav.php", r.json?.ok && r.json.updated.includes("klicenka.php") && r.json.updated.includes("klicenka-stav.php") && read("klicenka.php") === NEW && read("klicenka-stav.php") === STAV, r.json);
   check("klicenka-upravy.php bez pokynu nepřibyl", read("klicenka-upravy.php") === null);
   check("klicenka-udrzba.php bez pokynu nepřibyl", read("klicenka-udrzba.php") === null && (await status()).udrzba === false);
+  check("klicenka-overeni.php přibyl sám (neškodný)", r.json.updated.includes("klicenka-overeni.php") && read("klicenka-overeni.php") === OVERENI && (await status()).overeni === true, r.json);
+  const home = await (await fetch(`${WP}/?_=${Date.now()}`)).text();
+  check("úvodní stránka má značku google-site-verification", home.includes(`<meta name="google-site-verification" content="${GSC_TOKEN}" />`), home.slice(0, 300));
+  check("značka se bere podle hostitele webu", gscHosts[0] === "127.0.0.1", gscHosts);
+  const before = gscHosts.length;
+  await fetch(`${WP}/?_=${Date.now()}`);
+  check("značka z uložené hodnoty (tracker podruhé nevolá)", gscHosts.length === before, gscHosts);
   check("předchozí verze uložena jako .prev", read("klicenka.php.prev") === OLD);
   check("žádné .new po aktualizaci", !fs.readdirSync(mu).some((f) => f.endsWith(".new")));
   const st = await status();
