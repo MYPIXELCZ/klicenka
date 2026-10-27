@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – údržba webu
  * Description: Zálohy a bezpečné aktualizace WordPressu, pluginů a šablon na pokyn z Project Trackeru (MYPIXEL). Bez platného podepsaného tokenu nedělá nic.
- * Version: 0.1.0
+ * Version: 0.2.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -12,12 +12,18 @@
  *   parametry v podepsaném claimu "req" (tělo požadavku se nečte). Posílá se v "Authorization: Bearer …".
  *
  * Endpointy (?rest_route=/klicenka-udrzba/v1/…):
- *   POST zaloha       – záloha DB (.sql.gz) a wp-content/plugins + themes (.zip, uploads jen na přání) na hostingu
+ *   POST zaloha       – záloha DB (.sql.gz) a wp-content/plugins + themes (soubory.zip, uploads jen na přání) na hostingu;
+ *                       s req.krok po krocích (každé volání pracuje nejvýš req.budget s, stav v <id>/job.json, další volání
+ *                       pokračuje) — tak projdou i gigabajty médií na hostingu s limitem PHP 30–60 s
  *   POST aktualizace  – pro každou položku: čerstvá záloha (≤ 1 h), kopie položky, aktualizace, kontrola webu, při chybě návrat
  *   POST obnova       – obnova DB a/nebo souborů ze zálohy (token musí nést confirm "obnovit:<id>")
- *   GET  zalohy       – seznam záloh a posledních akcí
+ *   GET  zalohy       – seznam záloh, rozpracované zálohy po krocích a posledních akcí
+ *   GET  stahnout     – jeden soubor hotové zálohy (req.backup, req.file), s HTTP Range pro navázání přerušeného stahování
+ *   POST uvolnit      – záloha req.backup je uložená mimo hosting: označí ji a smaže místní zálohy s médii, které už
+ *                       mimo hosting jsou, kromě nejnovější zálohy (ta zůstává pro rychlý návrat)
  *
- * Zálohy leží v wp-content/klicenka-zalohy/<náhodný název>/ (+ .htaccess, index.php), drží se poslední 3.
+ * Zálohy leží v wp-content/klicenka-zalohy/<náhodný název>/ (+ .htaccess, index.php), drží se poslední 3. Soubory jsou
+ * v soubory.zip a u velkých záloh v dalších částech soubory-002.zip, soubory-003.zip, …
  * Vypnout úplně: define('KLICENKA_UDRZBA', false);
  */
 
@@ -28,12 +34,17 @@ if (defined('KLICENKA_UDRZBA_VERSION')) {
     return; // načteno podruhé (mu-plugins i plugin)
 }
 
-define('KLICENKA_UDRZBA_VERSION', '0.1.0');
+define('KLICENKA_UDRZBA_VERSION', '0.2.0');
 define('KLICENKA_UDRZBA_TYP', 'klicenka-udrzba+jwt');
 /** Kolik hotových záloh nechat. */
 define('KLICENKA_UDRZBA_KEEP', 3);
 /** Jak stará smí být záloha, aby se před aktualizací nedělala nová (s). */
 define('KLICENKA_UDRZBA_FRESH', 3600);
+/** Nejvyšší velikost (B) a počet souborů jedné části zálohy souborů (zipu). */
+define('KLICENKA_UDRZBA_PART_MAX', 512 * 1048576);
+define('KLICENKA_UDRZBA_PART_FILES', 10000);
+/** Záloha po krocích, na kterou nikdo nesáhl déle (s), je opuštěná (nedokončené složky smaže prune po dni). */
+define('KLICENKA_UDRZBA_JOB_STALE', 1200);
 
 // ---------------------------------------------------------------------------
 // Pomocné
@@ -531,71 +542,85 @@ function klicenka_udrzba_db_size()
 }
 
 /**
- * Export databáze po částech do .sql.gz: jeden příkaz na řádek (konce řádků v datech jsou escapované),
- * DROP + CREATE + INSERTy po max. ~1 MB, na konci řádek "-- konec zálohy".
- * @return array|WP_Error {tables, rows}
+ * Export databáze do .sql.gz po krocích: jeden příkaz na řádek (konce řádků v datech jsou escapované),
+ * DROP + CREATE + INSERTy po max. ~1 MB, na konci řádek "-- konec zálohy". Každý krok připíše nový gzip
+ * člen (gzip i PHP je čtou za sebou jako jeden soubor). $c = kurzor (ukládá se v úloze),
+ * $deadline = microtime, kdy krok ukončit (null = jet do konce; vždy se udělá aspoň jedna dávka).
+ * @return bool|WP_Error true = hotovo, false = pokračovat dalším krokem
  */
-function klicenka_udrzba_db_export($path)
+function klicenka_udrzba_db_export_step($path, &$c, $deadline = null)
 {
     global $wpdb;
-    $tables = klicenka_udrzba_tables();
-    if (!$tables) {
-        return klicenka_udrzba_error('db', 'V databázi nejsou žádné tabulky WordPressu.');
+    if (empty($c['tables'])) {
+        $tables = klicenka_udrzba_tables();
+        if (!$tables) {
+            return klicenka_udrzba_error('db', 'V databázi nejsou žádné tabulky WordPressu.');
+        }
+        $c = array('tables' => $tables, 't' => 0, 'begun' => false, 'pk' => null, 'pkIndex' => null, 'last' => null, 'offset' => 0, 'rows' => 0, 'started' => false);
     }
-    $gz = @gzopen($path, 'wb6');
+    $gz = @gzopen($path, $c['started'] ? 'ab6' : 'wb6');
     if (!$gz) {
         return klicenka_udrzba_error('write', 'Soubor zálohy databáze nejde vytvořit.');
     }
     $w = function ($s) use ($gz) {
         return gzwrite($gz, $s) !== false;
     };
-    $w('-- Klíčenka záloha databáze ' . gmdate('c') . ' (' . home_url() . ")\n");
-    // Stejná znaková sada spojení jako při exportu (u starých webů i latin1), jinak by se texty při obnově převedly.
-    if (!empty($wpdb->charset) && preg_match('/^[a-z0-9_]+$/i', (string) $wpdb->charset)) {
-        $w('SET NAMES ' . $wpdb->charset . ";\n");
-    }
-    $w("SET FOREIGN_KEY_CHECKS=0;\n");
-    $total = 0;
-    foreach ($tables as $t) {
-        $q = klicenka_udrzba_ident($t);
-        $create = $wpdb->get_row('SHOW CREATE TABLE ' . $q, ARRAY_N);
-        if (!is_array($create) || empty($create[1])) {
-            gzclose($gz);
-            return klicenka_udrzba_error('db', 'Nejde přečíst strukturu tabulky ' . $t . '.');
+    if (!$c['started']) {
+        $w('-- Klíčenka záloha databáze ' . gmdate('c') . ' (' . home_url() . ")\n");
+        // Stejná znaková sada spojení jako při exportu (u starých webů i latin1), jinak by se texty při obnově převedly.
+        if (!empty($wpdb->charset) && preg_match('/^[a-z0-9_]+$/i', (string) $wpdb->charset)) {
+            $w('SET NAMES ' . $wpdb->charset . ";\n");
         }
-        $w('DROP TABLE IF EXISTS ' . $q . ";\n");
-        $w(str_replace(array("\r\n", "\r", "\n"), ' ', $create[1]) . ";\n");
-
-        // Klíč pro stránkování: jeden celočíselný primární klíč → WHERE pk > poslední, jinak OFFSET.
-        $cols = $wpdb->get_results('SHOW COLUMNS FROM ' . $q, ARRAY_A);
-        $pk = null;
-        $pk_index = null;
-        $pri = 0;
-        foreach ((array) $cols as $i => $c) {
-            if (($c['Key'] ?? '') === 'PRI') {
-                $pri++;
-                if (preg_match('/int/i', (string) ($c['Type'] ?? ''))) {
-                    $pk = (string) $c['Field'];
-                    $pk_index = $i;
+        $w("SET FOREIGN_KEY_CHECKS=0;\n");
+        $c['started'] = true;
+    }
+    $batch = 1000;
+    $did = false;
+    while ($c['t'] < count($c['tables'])) {
+        $t = (string) $c['tables'][$c['t']];
+        $q = klicenka_udrzba_ident($t);
+        if (!$c['begun']) {
+            $create = $wpdb->get_row('SHOW CREATE TABLE ' . $q, ARRAY_N);
+            if (!is_array($create) || empty($create[1])) {
+                gzclose($gz);
+                return klicenka_udrzba_error('db', 'Nejde přečíst strukturu tabulky ' . $t . '.');
+            }
+            $w('DROP TABLE IF EXISTS ' . $q . ";\n");
+            $w(str_replace(array("\r\n", "\r", "\n"), ' ', $create[1]) . ";\n");
+            // Klíč pro stránkování: jeden celočíselný primární klíč → WHERE pk > poslední, jinak OFFSET.
+            $cols = $wpdb->get_results('SHOW COLUMNS FROM ' . $q, ARRAY_A);
+            $pk = null;
+            $pk_index = null;
+            $pri = 0;
+            foreach ((array) $cols as $i => $col) {
+                if (($col['Key'] ?? '') === 'PRI') {
+                    $pri++;
+                    if (preg_match('/int/i', (string) ($col['Type'] ?? ''))) {
+                        $pk = (string) $col['Field'];
+                        $pk_index = $i;
+                    }
                 }
             }
+            $c['pk'] = $pri === 1 ? $pk : null;
+            $c['pkIndex'] = $pri === 1 ? $pk_index : null;
+            $c['last'] = null;
+            $c['offset'] = 0;
+            $c['begun'] = true;
         }
-        if ($pri !== 1) {
-            $pk = null;
-        }
-        $last = null;
-        $offset = 0;
-        $batch = 1000;
         for (;;) {
+            if ($did && $deadline !== null && microtime(true) >= $deadline) {
+                return gzclose($gz) ? false : klicenka_udrzba_error('write', 'Zápis zálohy databáze selhal.');
+            }
             $ok = klicenka_udrzba_check_time();
             if (is_wp_error($ok)) {
                 gzclose($gz);
                 return $ok;
             }
-            if ($pk !== null) {
-                $sql = 'SELECT * FROM ' . $q . ($last !== null ? ' WHERE ' . klicenka_udrzba_ident($pk) . ' > ' . (int) $last : '') . ' ORDER BY ' . klicenka_udrzba_ident($pk) . ' ASC LIMIT ' . $batch;
+            $did = true;
+            if ($c['pk'] !== null) {
+                $sql = 'SELECT * FROM ' . $q . ($c['last'] !== null ? ' WHERE ' . klicenka_udrzba_ident($c['pk']) . ' > ' . (int) $c['last'] : '') . ' ORDER BY ' . klicenka_udrzba_ident($c['pk']) . ' ASC LIMIT ' . $batch;
             } else {
-                $sql = 'SELECT * FROM ' . $q . ' LIMIT ' . $batch . ' OFFSET ' . $offset;
+                $sql = 'SELECT * FROM ' . $q . ' LIMIT ' . $batch . ' OFFSET ' . (int) $c['offset'];
             }
             $rows = $wpdb->get_results($sql, ARRAY_N);
             if ($wpdb->last_error !== '') {
@@ -613,28 +638,30 @@ function klicenka_udrzba_db_export($path)
                     $chunk = '';
                 }
                 $chunk .= ($chunk === '' ? 'INSERT INTO ' . $q . ' VALUES ' : ',') . $vals;
-                $total++;
+                $c['rows']++;
             }
             if ($chunk !== '' && !$w($chunk . ";\n")) {
                 gzclose($gz);
                 return klicenka_udrzba_error('write', 'Zápis zálohy databáze selhal (místo na disku?).');
             }
-            if ($pk !== null) {
+            if ($c['pk'] !== null) {
                 $end = end($rows);
-                $last = $end[$pk_index];
+                $c['last'] = $end[$c['pkIndex']];
             } else {
-                $offset += $batch;
+                $c['offset'] += $batch;
             }
             if (count($rows) < $batch) {
                 break;
             }
         }
+        $c['t']++;
+        $c['begun'] = false;
     }
     $w("-- konec zálohy\n");
     if (!gzclose($gz)) {
         return klicenka_udrzba_error('write', 'Zápis zálohy databáze selhal.');
     }
-    return array('tables' => count($tables), 'rows' => $total);
+    return true;
 }
 
 /** Celý .gz se dá přečíst a končí značkou konce. */
@@ -670,59 +697,180 @@ function klicenka_udrzba_file_roots($uploads)
     return $roots;
 }
 
-/** @return array|WP_Error {files, bytes} */
-function klicenka_udrzba_files_zip($path, $uploads)
+/**
+ * Složky přímo v uploads, které se nezálohují: zálohy a mezipaměti jiných pluginů (zálohovat zálohy
+ * by jen zdvojovalo místo). Upravit jde filtrem klicenka_udrzba_vynechat_uploads (regulární výraz).
+ */
+function klicenka_udrzba_uploads_skip()
 {
-    if (!class_exists('ZipArchive')) {
-        return klicenka_udrzba_error('zip', 'Hosting nemá PHP rozšíření zip.');
-    }
-    $zip = new ZipArchive();
-    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-        return klicenka_udrzba_error('write', 'Soubor zálohy souborů nejde vytvořit.');
+    return (string) apply_filters('klicenka_udrzba_vynechat_uploads', '/^(backwpup-.*|backup-guard|wpvivid.*|updraft.*|ai1wm-backups|wp-staging.*|cache)$/i');
+}
+
+/**
+ * Seznam souborů k záloze do souboru, řádek na položku: "d <cesta>" nebo "f <cesta> <velikost>",
+ * cesta (s klíčem kořene, např. uploads/2024/01/a.jpg) je rawurlencode. Odkazy, zálohy Klíčenky
+ * a nečitelné složky se přeskočí. @return array|WP_Error {files, bytes}
+ */
+function klicenka_udrzba_list_files($list_path, $uploads)
+{
+    $h = @fopen($list_path, 'wb');
+    if (!$h) {
+        return klicenka_udrzba_error('write', 'Seznam souborů zálohy nejde vytvořit.');
     }
     $skip = realpath(klicenka_udrzba_base());
-    $count = 0;
+    $skip_uploads = klicenka_udrzba_uploads_skip();
+    $files = 0;
     $bytes = 0;
     foreach (klicenka_udrzba_file_roots($uploads) as $key => $dir) {
         if (!is_dir($dir)) {
             continue;
         }
-        $zip->addEmptyDir($key);
-        $len = strlen(rtrim($dir, '/')) + 1;
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
-        foreach ($it as $f) {
-            $p = $f->getPathname();
-            if ($skip && strpos($p, $skip) === 0) {
-                continue;
-            }
-            if ($f->isLink()) {
-                continue;
-            }
-            $rel = $key . '/' . substr($p, $len);
-            if ($f->isDir()) {
-                $zip->addEmptyDir($rel);
-            } elseif ($f->isFile() && $f->isReadable()) {
-                if (!$zip->addFile($p, $rel)) {
-                    $zip->close();
-                    @unlink($path);
-                    return klicenka_udrzba_error('zip', 'Soubor nejde přidat do zálohy: ' . $rel);
+        fwrite($h, 'd ' . rawurlencode($key) . "\n");
+        $base = rtrim($dir, '/');
+        $len = strlen($base) + 1;
+        $filter = new RecursiveCallbackFilterIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+            function ($f) use ($skip, $key, $base, $skip_uploads) {
+                if ($f->isLink()) {
+                    return false;
                 }
-                $count++;
-                $bytes += (int) $f->getSize();
+                $p = $f->getPathname();
+                if ($skip && strpos($p, $skip) === 0) {
+                    return false;
+                }
+                if ($key === 'uploads' && $f->isDir() && dirname($p) === $base && preg_match($skip_uploads, $f->getFilename())) {
+                    return false;
+                }
+                return true;
             }
-        }
-        $ok = klicenka_udrzba_check_time(60);
-        if (is_wp_error($ok)) {
-            $zip->close();
-            @unlink($path);
-            return $ok;
+        );
+        $it = new RecursiveIteratorIterator($filter, RecursiveIteratorIterator::SELF_FIRST, RecursiveIteratorIterator::CATCH_GET_CHILD);
+        foreach ($it as $f) {
+            $rel = $key . '/' . substr($f->getPathname(), $len);
+            if ($f->isDir()) {
+                $line = 'd ' . rawurlencode($rel) . "\n";
+            } elseif ($f->isFile() && $f->isReadable()) {
+                $size = (int) $f->getSize();
+                $line = 'f ' . rawurlencode($rel) . ' ' . $size . "\n";
+                $files++;
+                $bytes += $size;
+            } else {
+                continue;
+            }
+            if (fwrite($h, $line) === false) {
+                fclose($h);
+                return klicenka_udrzba_error('write', 'Seznam souborů zálohy nejde zapsat (místo na disku?).');
+            }
         }
     }
+    if (!fclose($h)) {
+        return klicenka_udrzba_error('write', 'Seznam souborů zálohy nejde zapsat.');
+    }
+    return array('files' => $files, 'bytes' => $bytes);
+}
+
+/** Přípony, které už jsou zkomprimované: do zipu se jen uloží (rychlé, žádné zbytečné CPU). */
+define('KLICENKA_UDRZBA_STORE_EXT', '/\.(jpe?g|png|gif|webp|avif|heic|heif|mp4|m4v|mov|webm|mkv|avi|mp3|m4a|aac|ogg|oga|opus|flac|zip|gz|tgz|bz2|xz|7z|rar|woff2?|pdf|docx|xlsx|pptx|odt|ods)$/i');
+
+/**
+ * Další část zálohy souborů: položky ze seznamu od $job['listPos'] do nového zipu (soubory.zip,
+ * soubory-002.zip, …), dokud nedojde limit velikosti nebo počtu souborů. Zip se po zavření už nikdy
+ * neotvírá znovu, takže každý krok je stejně rychlý i u gigabajtů médií.
+ * @return bool|WP_Error true = seznam došel (všechny části hotové)
+ */
+function klicenka_udrzba_zip_part($dir, &$job, $max_bytes, $max_files)
+{
+    if (!class_exists('ZipArchive')) {
+        return klicenka_udrzba_error('zip', 'Hosting nemá PHP rozšíření zip.');
+    }
+    $roots = klicenka_udrzba_file_roots(!empty($job['uploads']));
+    $h = @fopen($dir . '/seznam.txt', 'rb');
+    if (!$h || fseek($h, (int) $job['listPos']) !== 0) {
+        return klicenka_udrzba_error('zip', 'Seznam souborů zálohy nejde přečíst.');
+    }
+    $n = count($job['parts']) + 1;
+    $name = $n === 1 ? 'soubory.zip' : sprintf('soubory-%03d.zip', $n);
+    $path = $dir . '/' . $name;
+    $zip = new ZipArchive();
+    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        fclose($h);
+        return klicenka_udrzba_error('write', 'Soubor zálohy souborů nejde vytvořit.');
+    }
+    $store = method_exists($zip, 'setCompressionName');
+    $entries = 0;
+    $files = 0;
+    $bytes = 0;
+    $eof = true;
+    for (;;) {
+        $pos = ftell($h);
+        $line = fgets($h);
+        if ($line === false) {
+            break;
+        }
+        $parts = explode(' ', rtrim($line, "\r\n"));
+        $type = $parts[0];
+        $rel = isset($parts[1]) ? rawurldecode($parts[1]) : '';
+        $size = isset($parts[2]) ? (int) $parts[2] : 0;
+        if ($type === 'f' && $files > 0 && ($bytes + $size > $max_bytes || $files >= $max_files)) {
+            fseek($h, $pos);
+            $eof = false;
+            break;
+        }
+        $job['listPos'] = ftell($h);
+        $key = strtok($rel, '/');
+        if ($rel === '' || !isset($roots[$key]) || strpos($rel, '..') !== false) {
+            continue;
+        }
+        $abs = $roots[$key] . substr($rel, strlen($key));
+        if ($type === 'd') {
+            $zip->addEmptyDir($rel);
+            $entries++;
+            continue;
+        }
+        if ($type !== 'f') {
+            continue;
+        }
+        if (!is_file($abs) || !is_readable($abs)) {
+            $job['skipped'] = (int) ($job['skipped'] ?? 0) + 1; // mezitím smazaný soubor
+            continue;
+        }
+        if (!$zip->addFile($abs, $rel)) {
+            $zip->close();
+            fclose($h);
+            @unlink($path);
+            return klicenka_udrzba_error('zip', 'Soubor nejde přidat do zálohy: ' . $rel);
+        }
+        if ($store && preg_match(KLICENKA_UDRZBA_STORE_EXT, $rel)) {
+            $zip->setCompressionName($rel, ZipArchive::CM_STORE);
+        }
+        $entries++;
+        $files++;
+        $bytes += (int) @filesize($abs);
+    }
+    fclose($h);
+    if ($entries === 0) {
+        $zip->close(); // prázdný zip libzip ani nezapíše
+        @unlink($path);
+        return $eof;
+    }
+    $t = microtime(true);
     if (!$zip->close()) {
         @unlink($path);
         return klicenka_udrzba_error('write', 'Zápis zálohy souborů selhal (místo na disku?).');
     }
-    return array('files' => $count, 'bytes' => $bytes);
+    if (!klicenka_udrzba_zip_verify($path, $files)) {
+        @unlink($path);
+        return klicenka_udrzba_error('verify', 'Záloha souborů se nedá přečíst zpět, zrušeno.');
+    }
+    $job['parts'][] = array('name' => $name, 'size' => (int) filesize($path), 'sha256' => hash_file('sha256', $path), 'files' => $files);
+    $secs = microtime(true) - $t;
+    // Rychlost hostingu (zápis + kontrola + otisk), podle ní se velikost další části vejde do kroku.
+    if ($bytes > 4 * 1048576 && $secs > 0.05) {
+        $job['rate'] = (int) ($bytes / $secs);
+    }
+    $job['files'] += $files;
+    $job['bytes'] += $bytes;
+    return $eof;
 }
 
 function klicenka_udrzba_zip_verify($path, $expected_files)
@@ -745,73 +893,233 @@ function klicenka_udrzba_zip_verify($path, $expected_files)
     return $files === (int) $expected_files;
 }
 
-/**
- * Nová ověřená záloha. $opts: uploads (bool), kind (rucni | pred-aktualizaci | pred-obnovou), keep (id, které prune nesmaže).
- * @return array|WP_Error manifest
- */
-function klicenka_udrzba_backup_create($root, $opts = array())
+/** Části zálohy souborů v popisu zálohy (starší zálohy mají jen soubory.zip). */
+function klicenka_udrzba_zip_parts($m)
 {
-    $opts = array_merge(array('uploads' => false, 'kind' => 'rucni', 'keep' => ''), $opts);
-    $uploads = (bool) $opts['uploads'];
-    $need = klicenka_udrzba_db_size();
-    foreach (klicenka_udrzba_file_roots($uploads) as $dir) {
-        $need += klicenka_udrzba_dir_size($dir);
+    $out = array();
+    foreach ((array) ($m['files'] ?? array()) as $f) {
+        if (isset($f['name']) && preg_match('/^soubory(-\d{3})?\.zip$/', (string) $f['name'])) {
+            $out[] = (string) $f['name'];
+        }
     }
-    $space = klicenka_udrzba_check_space($root, $need);
+    return $out;
+}
+
+// ---------------------------------------------------------------------------
+// Záloha jako úloha po krocích (stav v <id>/job.json): jeden běh u synchronní zálohy,
+// nebo opakované krátké kroky (krok = jeden požadavek) u velkých záloh s médii.
+// ---------------------------------------------------------------------------
+
+function klicenka_udrzba_job_save($root, $job)
+{
+    $p = $root . '/' . $job['id'] . '/job.json';
+    return @file_put_contents($p . '.new', wp_json_encode($job)) !== false && @rename($p . '.new', $p);
+}
+
+/** Rozpracovaná záloha po krocích, na kterou se sáhlo v posledních 20 minutách (jinak je opuštěná). */
+function klicenka_udrzba_job_active($root)
+{
+    $names = (array) scandir($root);
+    rsort($names);
+    foreach ($names as $name) {
+        if (!klicenka_udrzba_backup_id_ok($name)) {
+            continue;
+        }
+        $p = $root . '/' . $name . '/job.json';
+        if (!is_file($p) || is_file($root . '/' . $name . '/manifest.json') || (int) @filemtime($p) < time() - KLICENKA_UDRZBA_JOB_STALE) {
+            continue;
+        }
+        $job = json_decode((string) @file_get_contents($p), true);
+        if (is_array($job) && ($job['id'] ?? '') === $name && !empty($job['chunked'])) {
+            return $job;
+        }
+    }
+    return null;
+}
+
+function klicenka_udrzba_job_public($job)
+{
+    return array(
+        'id' => $job['id'], 'created' => $job['created'], 'kind' => $job['kind'], 'uploads' => !empty($job['uploads']),
+        'phase' => $job['phase'], 'steps' => (int) $job['steps'], 'seconds' => round((float) $job['seconds'], 1),
+        'total' => $job['total'], 'done' => array('files' => (int) $job['files'], 'bytes' => (int) $job['bytes'], 'parts' => count($job['parts'])),
+        'db' => isset($job['db']['tables']) ? array('table' => (int) $job['db']['t'], 'tables' => count($job['db']['tables']), 'rows' => (int) $job['db']['rows']) : null,
+    );
+}
+
+/**
+ * Nová úloha zálohy. $opts: uploads (bool), kind (rucni | pred-aktualizaci | pred-obnovou | mimo-hosting),
+ * keep (id, které prune nesmaže), chunked (po krocích), partMax / partFiles (limity jedné části zipu).
+ * @return array|WP_Error
+ */
+function klicenka_udrzba_job_new($root, $opts = array())
+{
+    $opts = array_merge(array('uploads' => false, 'kind' => 'rucni', 'keep' => '', 'chunked' => false, 'partMax' => KLICENKA_UDRZBA_PART_MAX, 'partFiles' => KLICENKA_UDRZBA_PART_FILES), $opts);
+    $space = klicenka_udrzba_check_space($root, klicenka_udrzba_db_size());
     if (is_wp_error($space)) {
         return $space;
     }
     $id = gmdate('Ymd-His') . '-' . bin2hex(random_bytes(6));
-    $dir = $root . '/' . $id;
-    if (!@mkdir($dir, 0755)) {
+    if (!@mkdir($root . '/' . $id, 0755)) {
         return klicenka_udrzba_error('write', 'Složku zálohy nejde vytvořit.');
     }
-    $t0 = microtime(true);
-    $db = klicenka_udrzba_db_export($dir . '/db.sql.gz');
-    if (is_wp_error($db)) {
-        klicenka_udrzba_rmdir($dir);
-        return $db;
-    }
-    if (!klicenka_udrzba_db_verify($dir . '/db.sql.gz')) {
-        klicenka_udrzba_rmdir($dir);
-        return klicenka_udrzba_error('verify', 'Záloha databáze se nedá přečíst zpět, zrušeno.');
-    }
-    $files = klicenka_udrzba_files_zip($dir . '/soubory.zip', $uploads);
-    if (is_wp_error($files)) {
-        klicenka_udrzba_rmdir($dir);
-        return $files;
-    }
-    if (!klicenka_udrzba_zip_verify($dir . '/soubory.zip', $files['files'])) {
-        klicenka_udrzba_rmdir($dir);
-        return klicenka_udrzba_error('verify', 'Záloha souborů se nedá přečíst zpět, zrušeno.');
-    }
-    global $wp_version;
-    $parts = array();
-    foreach (array('db.sql.gz', 'soubory.zip') as $name) {
-        $parts[] = array('name' => $name, 'size' => (int) filesize($dir . '/' . $name), 'sha256' => hash_file('sha256', $dir . '/' . $name));
-    }
-    $manifest = array(
-        'id'        => $id,
-        'created'   => gmdate('c'),
-        'createdTs' => microtime(true),
-        'kind'      => (string) $opts['kind'],
-        'complete'  => true,
-        'uploads'   => $uploads,
-        'wordpress' => (string) $wp_version,
-        'db'        => $db,
-        'filesInfo' => $files,
-        'files'     => $parts,
-        'size'      => $parts[0]['size'] + $parts[1]['size'],
-        'sha256'    => hash('sha256', $parts[0]['sha256'] . $parts[1]['sha256']),
-        'seconds'   => round(microtime(true) - $t0, 1),
-        'by'        => klicenka_udrzba_actor()['email'],
+    $job = array(
+        'id' => $id, 'kind' => (string) $opts['kind'], 'uploads' => (bool) $opts['uploads'], 'keep' => (string) $opts['keep'],
+        'chunked' => (bool) $opts['chunked'], 'partMax' => (int) $opts['partMax'], 'partFiles' => (int) $opts['partFiles'],
+        'by' => klicenka_udrzba_actor()['email'], 'created' => gmdate('c'), 'createdTs' => microtime(true),
+        'phase' => 'db', 'steps' => 0, 'seconds' => 0.0, 'db' => array(), 'listPos' => 0, 'total' => null,
+        'parts' => array(), 'files' => 0, 'bytes' => 0, 'skipped' => 0, 'rate' => null,
     );
-    if (@file_put_contents($dir . '/manifest.json.new', wp_json_encode($manifest)) === false || !@rename($dir . '/manifest.json.new', $dir . '/manifest.json')) {
-        klicenka_udrzba_rmdir($dir);
-        return klicenka_udrzba_error('write', 'Popis zálohy nejde uložit.');
+    if (!klicenka_udrzba_job_save($root, $job)) {
+        klicenka_udrzba_rmdir($root . '/' . $id);
+        return klicenka_udrzba_error('write', 'Stav zálohy nejde uložit.');
     }
-    klicenka_udrzba_prune($root, (string) $opts['keep']);
-    return $manifest;
+    return $job;
+}
+
+/**
+ * Smaže místní zálohy s médii, které už jsou uložené mimo hosting (příznak offsite), kromě nejnovější
+ * hotové zálohy (ta zůstává pro rychlý návrat) a $keep. @return string[] smazaná id
+ */
+function klicenka_udrzba_free_offsite($root, $keep = '')
+{
+    $list = klicenka_udrzba_backups($root);
+    $deleted = array();
+    foreach ($list as $i => $b) {
+        if ($i === 0 || $b['id'] === $keep || empty($b['offsite']) || empty($b['uploads'])) {
+            continue;
+        }
+        if (klicenka_udrzba_rmdir($root . '/' . $b['id'])) {
+            $deleted[] = $b['id'];
+        }
+    }
+    return $deleted;
+}
+
+/**
+ * Pokračuje v úloze do $deadline (microtime; null = až do konce, jen s pojistkou max_execution_time).
+ * Při chybě složku úlohy smaže. @return array|false|WP_Error manifest hotové zálohy / false = pokračovat
+ */
+function klicenka_udrzba_job_run($root, &$job, $deadline = null)
+{
+    $dir = $root . '/' . $job['id'];
+    $t0 = microtime(true);
+    $job['steps']++;
+    $budget = $deadline === null ? null : max(1.0, $deadline - $t0);
+    $fail = function ($e) use ($dir) {
+        klicenka_udrzba_rmdir($dir);
+        return $e;
+    };
+    $did = false;
+    for (;;) {
+        if ($did && $deadline !== null && microtime(true) >= $deadline) {
+            break;
+        }
+        if ($job['phase'] === 'db') {
+            $r = klicenka_udrzba_db_export_step($dir . '/db.sql.gz', $job['db'], $deadline);
+            if (is_wp_error($r)) {
+                return $fail($r);
+            }
+            $did = true;
+            if ($r !== true) {
+                break;
+            }
+            if (!klicenka_udrzba_db_verify($dir . '/db.sql.gz')) {
+                return $fail(klicenka_udrzba_error('verify', 'Záloha databáze se nedá přečíst zpět, zrušeno.'));
+            }
+            $job['phase'] = 'list';
+        } elseif ($job['phase'] === 'list') {
+            $l = klicenka_udrzba_list_files($dir . '/seznam.txt', !empty($job['uploads']));
+            if (is_wp_error($l)) {
+                return $fail($l);
+            }
+            $job['total'] = $l;
+            $space = klicenka_udrzba_check_space($root, $l['bytes']);
+            if (is_wp_error($space) && klicenka_udrzba_free_offsite($root, (string) $job['keep'])) {
+                $space = klicenka_udrzba_check_space($root, $l['bytes']);
+            }
+            if (is_wp_error($space)) {
+                return $fail($space);
+            }
+            $did = true;
+            $job['phase'] = 'zip';
+        } elseif ($job['phase'] === 'zip') {
+            if ($deadline === null) {
+                $ok = klicenka_udrzba_check_time(60);
+                if (is_wp_error($ok)) {
+                    return $fail($ok);
+                }
+                $max = $job['partMax'];
+            } else {
+                $left = $deadline - microtime(true);
+                if ($did && $left < 0.4 * $budget) {
+                    break; // na další část už by čas nemusel stačit
+                }
+                // Velikost části podle změřené rychlosti hostingu, ať se vejde do zbytku kroku.
+                $rate = $job['rate'] ? (int) $job['rate'] : 20 * 1048576;
+                $max = (int) min($job['partMax'], max(4 * 1048576, $rate * max(1.0, $left) * 0.6));
+            }
+            $r = klicenka_udrzba_zip_part($dir, $job, $max, $job['partFiles']);
+            if (is_wp_error($r)) {
+                return $fail($r);
+            }
+            $did = true;
+            if ($r === true) {
+                $job['phase'] = 'finish';
+            }
+        } else {
+            global $wp_version;
+            $parts = array(array('name' => 'db.sql.gz', 'size' => (int) filesize($dir . '/db.sql.gz'), 'sha256' => hash_file('sha256', $dir . '/db.sql.gz')));
+            foreach ($job['parts'] as $p) {
+                $parts[] = array('name' => $p['name'], 'size' => $p['size'], 'sha256' => $p['sha256']);
+            }
+            $job['seconds'] += microtime(true) - $t0;
+            $manifest = array(
+                'id'        => $job['id'],
+                'created'   => $job['created'],
+                'createdTs' => $job['createdTs'],
+                'kind'      => $job['kind'],
+                'complete'  => true,
+                'uploads'   => !empty($job['uploads']),
+                'wordpress' => (string) $wp_version,
+                'db'        => array('tables' => count($job['db']['tables']), 'rows' => (int) $job['db']['rows']),
+                'filesInfo' => array('files' => (int) $job['files'], 'bytes' => (int) $job['bytes'], 'skipped' => (int) $job['skipped']),
+                'files'     => $parts,
+                'size'      => array_sum(wp_list_pluck($parts, 'size')),
+                'sha256'    => hash('sha256', implode('', wp_list_pluck($parts, 'sha256'))),
+                'seconds'   => round((float) $job['seconds'], 1),
+                'steps'     => (int) $job['steps'],
+                'chunked'   => !empty($job['chunked']),
+                'by'        => $job['by'],
+            );
+            if (@file_put_contents($dir . '/manifest.json.new', wp_json_encode($manifest)) === false || !@rename($dir . '/manifest.json.new', $dir . '/manifest.json')) {
+                return $fail(klicenka_udrzba_error('write', 'Popis zálohy nejde uložit.'));
+            }
+            @unlink($dir . '/job.json');
+            @unlink($dir . '/seznam.txt');
+            klicenka_udrzba_prune($root, (string) $job['keep']);
+            return $manifest;
+        }
+    }
+    $job['seconds'] += microtime(true) - $t0;
+    if (!klicenka_udrzba_job_save($root, $job)) {
+        return $fail(klicenka_udrzba_error('write', 'Stav zálohy nejde uložit.'));
+    }
+    return false;
+}
+
+/**
+ * Nová ověřená záloha naráz (v jednom požadavku). $opts: uploads (bool), kind, keep (id, které prune nesmaže).
+ * @return array|WP_Error manifest
+ */
+function klicenka_udrzba_backup_create($root, $opts = array())
+{
+    $job = klicenka_udrzba_job_new($root, $opts);
+    if (is_wp_error($job)) {
+        return $job;
+    }
+    $m = klicenka_udrzba_job_run($root, $job, null);
+    return $m === false ? klicenka_udrzba_error('timeout', 'Záloha se nedokončila.', 504) : $m;
 }
 
 function klicenka_udrzba_public_backup($m)
@@ -820,15 +1128,28 @@ function klicenka_udrzba_public_backup($m)
         'id' => $m['id'], 'created' => $m['created'], 'kind' => $m['kind'], 'uploads' => !empty($m['uploads']), 'wordpress' => $m['wordpress'] ?? null,
         'size' => (int) $m['size'], 'sha256' => $m['sha256'], 'files' => $m['files'], 'tables' => $m['db']['tables'] ?? null, 'rows' => $m['db']['rows'] ?? null,
         'fileCount' => $m['filesInfo']['files'] ?? null, 'seconds' => $m['seconds'] ?? null, 'by' => $m['by'] ?? null,
+        'chunked' => !empty($m['chunked']), 'offsite' => $m['offsite'] ?? null,
     );
 }
 
-/** Soubory zálohy odpovídají otiskům v popisu. */
-function klicenka_udrzba_backup_intact($root, $m)
+/**
+ * Soubory zálohy odpovídají otiskům v popisu. $quick: velké soubory (nad 64 MB, typicky média) jen podle
+ * velikosti — otisk gigabajtů by před aktualizací na sdíleném hostingu snědl celý limit běhu.
+ */
+function klicenka_udrzba_backup_intact($root, $m, $quick = false)
 {
     foreach ($m['files'] as $f) {
         $p = $root . '/' . $m['id'] . '/' . $f['name'];
-        if (!is_file($p) || hash_file('sha256', $p) !== $f['sha256']) {
+        if (!is_file($p)) {
+            return false;
+        }
+        if ($quick && isset($f['size']) && $f['size'] > 64 * 1048576) {
+            if ((int) filesize($p) !== (int) $f['size']) {
+                return false;
+            }
+            continue;
+        }
+        if (hash_file('sha256', $p) !== $f['sha256']) {
             return false;
         }
     }
@@ -1226,7 +1547,7 @@ function klicenka_udrzba_update_item($item, $backup_dir, $root)
 function klicenka_udrzba_ensure_backup($root, $uploads)
 {
     foreach (klicenka_udrzba_backups($root) as $b) {
-        if ((int) ($b['createdTs'] ?? 0) >= time() - KLICENKA_UDRZBA_FRESH && klicenka_udrzba_backup_intact($root, $b)) {
+        if ((int) ($b['createdTs'] ?? 0) >= time() - KLICENKA_UDRZBA_FRESH && klicenka_udrzba_backup_intact($root, $b, true)) {
             return array('backup' => $b, 'new' => false);
         }
         break;
@@ -1309,23 +1630,45 @@ function klicenka_udrzba_files_restore($root, $m)
         return klicenka_udrzba_error('zip', 'Hosting nemá PHP rozšíření zip.');
     }
     $tmp = $root . '/tmp/restore-' . bin2hex(random_bytes(4));
-    $zip = new ZipArchive();
-    if ($zip->open($root . '/' . $m['id'] . '/soubory.zip') !== true) {
-        return klicenka_udrzba_error('restore', 'Zálohu souborů nejde otevřít.');
+    $parts = klicenka_udrzba_zip_parts($m);
+    if (!$parts) {
+        return klicenka_udrzba_error('restore', 'Záloha nemá žádné soubory.');
     }
-    for ($i = 0; $i < $zip->numFiles; $i++) {
-        $name = (string) $zip->getNameIndex($i);
-        if (strpos($name, '..') !== false || $name === '' || $name[0] === '/' || !preg_match('#^(plugins|themes|uploads)(/|$)#', $name)) {
-            $zip->close();
-            return klicenka_udrzba_error('restore', 'Záloha souborů obsahuje nepovolenou cestu.');
+    // Všechny části nejdřív zkontrolovat, pak rozbalit vedle (část po části do stejné složky).
+    foreach ($parts as $part) {
+        $zip = new ZipArchive();
+        if ($zip->open($root . '/' . $m['id'] . '/' . $part) !== true) {
+            return klicenka_udrzba_error('restore', 'Zálohu souborů nejde otevřít (' . $part . ').');
         }
-    }
-    if (!@mkdir($tmp, 0755, true) || !$zip->extractTo($tmp)) {
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = (string) $zip->getNameIndex($i);
+            if (strpos($name, '..') !== false || $name === '' || $name[0] === '/' || !preg_match('#^(plugins|themes|uploads)(/|$)#', $name)) {
+                $zip->close();
+                return klicenka_udrzba_error('restore', 'Záloha souborů obsahuje nepovolenou cestu.');
+            }
+        }
         $zip->close();
-        klicenka_udrzba_rmdir($tmp);
+    }
+    if (!@mkdir($tmp, 0755, true)) {
         return klicenka_udrzba_error('restore', 'Zálohu souborů nejde rozbalit (místo na disku?).');
     }
-    $zip->close();
+    foreach ($parts as $part) {
+        $zip = new ZipArchive();
+        $opened = $zip->open($root . '/' . $m['id'] . '/' . $part) === true;
+        $extracted = $opened && $zip->extractTo($tmp);
+        if ($opened) {
+            $zip->close();
+        }
+        if (!$extracted) {
+            klicenka_udrzba_rmdir($tmp);
+            return klicenka_udrzba_error('restore', 'Zálohu souborů nejde rozbalit (místo na disku?).');
+        }
+        $ok = klicenka_udrzba_check_time(30);
+        if (is_wp_error($ok)) {
+            klicenka_udrzba_rmdir($tmp);
+            return $ok;
+        }
+    }
     $done = array();
     $error = null;
     foreach (klicenka_udrzba_file_roots(!empty($m['uploads'])) as $key => $dir) {
@@ -1398,13 +1741,54 @@ function klicenka_udrzba_rest_backup()
     }
     list($root) = $b;
     $req = klicenka_udrzba_claims()['req'];
-    $m = klicenka_udrzba_backup_create($root, array('kind' => 'rucni', 'uploads' => !empty($req['uploads'])));
-    $entry = array('time' => gmdate('c'), 'akce' => 'zaloha', 'by' => klicenka_udrzba_actor()['email'], 'ok' => !is_wp_error($m), 'backup' => is_wp_error($m) ? null : $m['id'], 'error' => is_wp_error($m) ? $m->get_error_message() : null);
-    klicenka_udrzba_log_run($root, $entry);
+    $uploads = !empty($req['uploads']);
+    $kind = isset($req['kind']) && in_array($req['kind'], array('rucni', 'mimo-hosting'), true) ? $req['kind'] : 'rucni';
+    $log = function ($m) use ($root) {
+        klicenka_udrzba_log_run($root, array('time' => gmdate('c'), 'akce' => 'zaloha', 'by' => klicenka_udrzba_actor()['email'], 'ok' => !is_wp_error($m), 'backup' => is_wp_error($m) ? null : $m['id'], 'error' => is_wp_error($m) ? $m->get_error_message() : null));
+    };
+    if (empty($req['krok'])) {
+        $m = klicenka_udrzba_backup_create($root, array('kind' => $kind, 'uploads' => $uploads));
+        $log($m);
+        return is_wp_error($m) ? klicenka_udrzba_fail($m) : klicenka_udrzba_respond(array('ok' => true, 'done' => true, 'backup' => klicenka_udrzba_public_backup($m)));
+    }
+
+    // Po krocích: každé volání pracuje nejvýš budget sekund (a vždy s rezervou před limitem PHP), pak uloží stav.
+    $budget = isset($req['budget']) ? max(1, min(120, (int) $req['budget'])) : 25;
+    $deadline = microtime(true) + $budget;
+    $left = klicenka_udrzba_time_left();
+    if ($left !== null) {
+        $deadline = min($deadline, microtime(true) + max(1, $left - 15));
+    }
+    $job = klicenka_udrzba_job_active($root);
+    if ($job && (bool) $job['uploads'] !== $uploads) {
+        return klicenka_udrzba_fail(klicenka_udrzba_error('busy', 'Na webu se právě dělá jiná záloha po krocích (' . ($job['uploads'] ? 's médii' : 'bez médií') . '). Zkuste to za chvíli.', 409));
+    }
+    if (!$job) {
+        $job = klicenka_udrzba_job_new($root, array(
+            'kind' => $kind, 'uploads' => $uploads, 'chunked' => true,
+            'partMax' => isset($req['part']) ? max(1048576, min(KLICENKA_UDRZBA_PART_MAX, (int) $req['part'])) : KLICENKA_UDRZBA_PART_MAX,
+            'partFiles' => isset($req['partFiles']) ? max(50, min(KLICENKA_UDRZBA_PART_FILES, (int) $req['partFiles'])) : KLICENKA_UDRZBA_PART_FILES,
+        ));
+        if (is_wp_error($job)) {
+            $log($job);
+            return klicenka_udrzba_fail($job);
+        }
+    }
+    $m = klicenka_udrzba_job_run($root, $job, $deadline);
+    if ($m === false) {
+        return klicenka_udrzba_respond(array('ok' => true, 'done' => false, 'job' => klicenka_udrzba_job_public($job)));
+    }
+    $log($m);
     if (is_wp_error($m)) {
         return klicenka_udrzba_fail($m);
     }
-    return klicenka_udrzba_respond(array('ok' => true, 'backup' => klicenka_udrzba_public_backup($m)));
+    return klicenka_udrzba_respond(array('ok' => true, 'done' => true, 'backup' => klicenka_udrzba_public_backup($m)));
+}
+
+/** Aktualizace ani obnova nesmí měnit soubory, zatímco se po krocích balí záloha. @return true|WP_Error */
+function klicenka_udrzba_no_active_job($root)
+{
+    return klicenka_udrzba_job_active($root) ? klicenka_udrzba_error('busy', 'Na webu se právě po krocích dělá záloha (pro zálohu mimo hosting). Zkuste to za pár minut.', 409) : true;
 }
 
 function klicenka_udrzba_rest_update()
@@ -1414,6 +1798,10 @@ function klicenka_udrzba_rest_update()
         return klicenka_udrzba_fail($b);
     }
     list($root) = $b;
+    $busy = klicenka_udrzba_no_active_job($root);
+    if (is_wp_error($busy)) {
+        return klicenka_udrzba_fail($busy);
+    }
     $req = klicenka_udrzba_claims()['req'];
     $items = klicenka_udrzba_items($req['items'] ?? array());
     if (!$items) {
@@ -1468,6 +1856,10 @@ function klicenka_udrzba_rest_restore()
         return klicenka_udrzba_fail($b);
     }
     list($root) = $b;
+    $busy = klicenka_udrzba_no_active_job($root);
+    if (is_wp_error($busy)) {
+        return klicenka_udrzba_fail($busy);
+    }
     $req = klicenka_udrzba_claims()['req'];
     $id = (string) $req['backup'];
     $db = !empty($req['db']);
@@ -1543,6 +1935,7 @@ function klicenka_udrzba_rest_list()
         'plugin'   => KLICENKA_UDRZBA_VERSION,
         'wordpress' => (string) $wp_version,
         'backups'  => array_map('klicenka_udrzba_public_backup', klicenka_udrzba_backups($root)),
+        'job'      => ($job = klicenka_udrzba_job_active($root)) ? klicenka_udrzba_job_public($job) : null,
         'runs'     => klicenka_udrzba_state($root)['runs'],
         'checks'   => array(
             'zip'        => class_exists('ZipArchive'),
@@ -1553,6 +1946,155 @@ function klicenka_udrzba_rest_list()
     ));
 }
 
+/** Hotová záloha podle id (nebo null). */
+function klicenka_udrzba_find_backup($root, $id)
+{
+    if (!klicenka_udrzba_backup_id_ok($id)) {
+        return null;
+    }
+    foreach (klicenka_udrzba_backups($root) as $x) {
+        if ($x['id'] === $id) {
+            return $x;
+        }
+    }
+    return null;
+}
+
+/**
+ * Stažení jednoho souboru hotové zálohy (db.sql.gz, soubory*.zip, manifest.json) proudem, po 1 MB.
+ * Token má akci "stahnout" a v req.backup + req.file přesně tento soubor; Range "bytes=od-[do]" vrací 206,
+ * takže přerušené stahování naváže tam, kde skončilo (s novým tokenem).
+ */
+function klicenka_udrzba_rest_download(WP_REST_Request $request)
+{
+    klicenka_udrzba_quiet_db();
+    $root = klicenka_udrzba_root();
+    if (is_wp_error($root)) {
+        return klicenka_udrzba_fail($root);
+    }
+    $req = klicenka_udrzba_claims()['req'];
+    $id = isset($req['backup']) ? (string) $req['backup'] : '';
+    $file = isset($req['file']) ? (string) $req['file'] : '';
+    if (!klicenka_udrzba_backup_id_ok($id) || !preg_match('/^(db\.sql\.gz|soubory(-\d{3})?\.zip|manifest\.json)$/', $file)) {
+        return klicenka_udrzba_fail(klicenka_udrzba_error('request', 'Neplatný soubor zálohy.', 400));
+    }
+    $m = klicenka_udrzba_find_backup($root, $id);
+    $names = $m ? array_merge(wp_list_pluck($m['files'], 'name'), array('manifest.json')) : array();
+    if (!$m || !in_array($file, $names, true)) {
+        return klicenka_udrzba_fail(klicenka_udrzba_error('not-found', 'Soubor zálohy na webu není.', 404));
+    }
+    $path = $root . '/' . $id . '/' . $file;
+    $size = @filesize($path);
+    $h = $size === false ? false : @fopen($path, 'rb');
+    if (!$h) {
+        return klicenka_udrzba_fail(klicenka_udrzba_error('not-found', 'Soubor zálohy nejde otevřít.', 404));
+    }
+    $start = 0;
+    $end = $size - 1;
+    $partial = false;
+    $range = trim((string) $request->get_header('range'));
+    if ($range !== '') {
+        if (!preg_match('/^bytes=(\d*)-(\d*)$/', $range, $mm) || ($mm[1] === '' && $mm[2] === '')) {
+            fclose($h);
+            return klicenka_udrzba_fail(klicenka_udrzba_error('range', 'Neplatný rozsah.', 416));
+        }
+        if ($mm[1] === '') {
+            $start = max(0, $size - (int) $mm[2]); // posledních N bajtů
+        } else {
+            $start = (int) $mm[1];
+            if ($mm[2] !== '') {
+                $end = min($end, (int) $mm[2]);
+            }
+        }
+        if ($start >= $size || $start > $end) {
+            fclose($h);
+            $r = klicenka_udrzba_respond(array('ok' => false, 'error' => 'range', 'message' => 'Rozsah je mimo soubor.'), 416);
+            $r->header('Content-Range', 'bytes */' . $size);
+            return $r;
+        }
+        $partial = true;
+    }
+    $sha = null;
+    foreach ($m['files'] as $f) {
+        if ($f['name'] === $file) {
+            $sha = $f['sha256'];
+        }
+    }
+    // Žádné bufferování ani komprese: velký soubor jde rovnou ven.
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+    @ini_set('zlib.output_compression', 'Off');
+    if (function_exists('apache_setenv')) {
+        @apache_setenv('no-gzip', '1');
+    }
+    $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+    if (function_exists('set_time_limit') && !in_array('set_time_limit', $disabled, true)) {
+        @set_time_limit(0);
+    }
+    @ignore_user_abort(false);
+    status_header($partial ? 206 : 200);
+    header('Content-Type: application/octet-stream');
+    header('Content-Disposition: attachment; filename="' . $file . '"');
+    header('Content-Length: ' . ($end - $start + 1));
+    header('Accept-Ranges: bytes');
+    if ($partial) {
+        header('Content-Range: bytes ' . $start . '-' . $end . '/' . $size);
+    }
+    if ($sha) {
+        header('X-Klicenka-Sha256: ' . $sha);
+    }
+    header('Cache-Control: no-store');
+    header('X-Content-Type-Options: nosniff');
+    header('X-Accel-Buffering: no');
+    if ($start > 0) {
+        fseek($h, $start);
+    }
+    $left = $end - $start + 1;
+    while ($left > 0 && !feof($h)) {
+        $data = fread($h, (int) min(1048576, $left));
+        if ($data === false || $data === '') {
+            break;
+        }
+        echo $data;
+        $left -= strlen($data);
+        flush();
+        if (connection_aborted()) {
+            break;
+        }
+    }
+    fclose($h);
+    exit;
+}
+
+/**
+ * Záloha req.backup je bezpečně uložená mimo hosting: v popisu se označí (offsite) a místní zálohy s médii,
+ * které už mimo hosting jsou, se smažou — kromě nejnovější hotové zálohy, ta zůstává pro rychlý návrat.
+ */
+function klicenka_udrzba_rest_release()
+{
+    $b = klicenka_udrzba_begin();
+    if (is_wp_error($b)) {
+        return klicenka_udrzba_fail($b);
+    }
+    list($root) = $b;
+    $req = klicenka_udrzba_claims()['req'];
+    $id = isset($req['backup']) ? (string) $req['backup'] : '';
+    $m = klicenka_udrzba_find_backup($root, $id);
+    if (!$m) {
+        return klicenka_udrzba_fail(klicenka_udrzba_error('not-found', 'Záloha na webu není.', 404));
+    }
+    $m['offsite'] = gmdate('c');
+    $dir = $root . '/' . $id;
+    if (@file_put_contents($dir . '/manifest.json.new', wp_json_encode($m)) === false || !@rename($dir . '/manifest.json.new', $dir . '/manifest.json')) {
+        return klicenka_udrzba_fail(klicenka_udrzba_error('write', 'Popis zálohy nejde uložit.'));
+    }
+    $deleted = klicenka_udrzba_free_offsite($root);
+    $list = klicenka_udrzba_backups($root);
+    klicenka_udrzba_log_run($root, array('time' => gmdate('c'), 'akce' => 'uvolnit', 'by' => klicenka_udrzba_actor()['email'], 'ok' => true, 'backup' => $id, 'error' => null, 'deleted' => $deleted));
+    return klicenka_udrzba_respond(array('ok' => true, 'backup' => $id, 'deleted' => $deleted, 'newest' => $list ? $list[0]['id'] : null));
+}
+
 if (!defined('KLICENKA_UDRZBA') || KLICENKA_UDRZBA) {
     add_action('rest_api_init', function () {
         $routes = array(
@@ -1560,6 +2102,8 @@ if (!defined('KLICENKA_UDRZBA') || KLICENKA_UDRZBA) {
             'aktualizace' => array('POST', 'klicenka_udrzba_rest_update'),
             'obnova'      => array('POST', 'klicenka_udrzba_rest_restore'),
             'zalohy'      => array('GET', 'klicenka_udrzba_rest_list'),
+            'stahnout'    => array('GET', 'klicenka_udrzba_rest_download'),
+            'uvolnit'     => array('POST', 'klicenka_udrzba_rest_release'),
         );
         foreach ($routes as $akce => $r) {
             register_rest_route('klicenka-udrzba/v1', '/' . $akce, array(
