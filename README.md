@@ -19,6 +19,18 @@ seznam souborů podepsaný klíčem Klíčenky, ověří podpis, otisky SHA-256 
 (předchozí verze zůstane jako `.prev`). Novou verzi vydáš tak, že v trackeru spustíš `node scripts/klicenka-wp-sync.mjs`
 a nasadíš ho. Vypnutí na webu: `define('KLICENKA_AUTO_UPDATE', false);`.
 
+## Verze
+
+Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verzí**:
+
+- **npm balíček** (`@mypixel/klicenka`, JS adaptéry v `src/` → `dist/`) – verze v `package.json`,
+  tagy `vX.Y.Z` (např. `v1.2.0`). Zvyšuje se jen při změně kódu balíčku.
+- **WordPress mu-plugin** (`wordpress/klicenka/klicenka.php`) – verze v hlavičce `Version:`
+  a v `KLICENKA_PLUGIN_VERSION`, tagy `wp-X.Y.Z` (např. `wp-1.4.1`).
+- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`) – každý má verzi ve své hlavičce, zatím bez tagů.
+
+Číslo WordPress pluginu (1.4.x) tedy neznamená, že existuje npm verze 1.4.
+
 ## Rychlý start (Next.js, vlastní session)
 
 ```ts
