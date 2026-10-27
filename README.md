@@ -27,7 +27,23 @@ Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verz
   tagy `vX.Y.Z` (např. `v1.2.0`). Zvyšuje se jen při změně kódu balíčku.
 - **WordPress mu-plugin** (`wordpress/klicenka/klicenka.php`) – verze v hlavičce `Version:`
   a v `KLICENKA_PLUGIN_VERSION`, tagy `wp-X.Y.Z` (např. `wp-1.4.1`).
-- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`) – každý má verzi ve své hlavičce, zatím bez tagů.
+- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`, `klicenka-udrzba`) – každý má verzi ve své hlavičce, zatím bez tagů.
+
+## Údržba WordPressu a záloha mimo hosting (`klicenka-udrzba` 0.2.0)
+
+Pasivní doplněk: dělá jen to, co nese podepsaný token z trackeru (typ `klicenka-udrzba+jwt`, scope `udrzba`, 60 s,
+jednorázový, akce = endpoint). Zálohy na hostingu (`wp-content/klicenka-zalohy/<náhodná složka>/<id>/`: `db.sql.gz`,
+`soubory.zip` a u velkých záloh další části `soubory-002.zip`, …), aktualizace s návratem při chybě, obnova.
+
+- **Záloha po krocích** (`zaloha` s `req.krok`): každé volání pracuje nejvýš `req.budget` s (výchozí 25) a uloží stav
+  do `<id>/job.json`; další volání pokračuje. Databáze se píše po dávkách (každý krok = další gzip člen), soubory
+  se nejdřív sepíší a pak balí do částí zipu, které se po zavření už neotvírají — gigabajty médií tak projdou i na
+  hostingu s limitem PHP 30–60 s. Fotky a jiné zkomprimované soubory se do zipu jen ukládají. Mezipaměti a zálohy
+  jiných pluginů v uploads se vynechávají (filtr `klicenka_udrzba_vynechat_uploads`).
+- **Stažení** (`stahnout`, GET): jeden soubor hotové zálohy podle `req.backup` + `req.file`, s HTTP Range (206).
+- **Uvolnění** (`uvolnit`): záloha je mimo hosting → označí se a smažou se starší místní zálohy s médii, které už
+  mimo hosting jsou. Nejnovější záloha zůstává vždy.
+- Test: `node wordpress/klicenka-udrzba/test/run.mjs` (WP Playground, i `PHP_VERSION=7.4`).
 
 Číslo WordPress pluginu (1.4.x) tedy neznamená, že existuje npm verze 1.4.
 

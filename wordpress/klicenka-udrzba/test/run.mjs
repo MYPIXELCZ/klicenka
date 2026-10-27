@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Test klicenka-udrzba na WP Playground vedle klicenka.php: tokeny, záloha, aktualizace testovacího pluginu
-// a šablony z lokálních zipů, vynucená chyba → návrat, obnova DB a souborů, držení posledních 3 záloh.
+// a šablony z lokálních zipů, vynucená chyba → návrat, obnova DB a souborů, držení posledních 3 záloh,
+// záloha po krocích s médii (víc částí zipu), stažení s HTTP Range a uvolnění místa po záloze mimo hosting.
 // Použití:  [PHP_VERSION=7.4] node wordpress/klicenka-udrzba/test/run.mjs [--keep]
 // Nic neposílá ven: JWKS běží lokálně, wordpress.org je v testu zablokovaný.
 import { spawn, execFileSync } from "node:child_process";
@@ -46,7 +47,24 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "klicenka-udrzba-test-"));
 const mu = path.join(tmp, "mu-plugins");
 const zalohy = path.join(tmp, "zalohy");
 const zips = path.join(tmp, "zips");
-for (const d of [mu, zalohy, zips]) fs.mkdirSync(d);
+// uploads o složku níž než přípojný bod (UPLOADS), aby ji obnova mohla vyměnit přejmenováním jako na hostingu.
+const mediaMount = path.join(tmp, "media");
+const uploads = path.join(mediaMount, "uploads");
+for (const d of [mu, zalohy, zips, mediaMount, uploads]) fs.mkdirSync(d);
+
+// Média: hodně malých „fotek“ (náhodná, nekomprimovatelná data), pár větších, text, prázdná složka
+// a složky, které se zálohovat nemají (mezipaměť, zálohy jiného pluginu).
+const media = {};
+const put = (rel, buf) => { const p = path.join(uploads, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, buf); media[rel] = buf; };
+for (let i = 0; i < 600; i++) put(`2024/01/foto-${String(i).padStart(3, "0")}.jpg`, crypto.randomBytes(2048 + (i % 7) * 1024));
+for (let i = 0; i < 6; i++) put(`2024/03/velka-${i}.jpg`, crypto.randomBytes(700 * 1024));
+for (let i = 0; i < 300; i++) put(`2025/06/text ${i} á.txt`, Buffer.from(`Příliš žluťoučký kůň ${i}\n`.repeat(40)));
+fs.mkdirSync(path.join(uploads, "2024/02/prazdna"), { recursive: true });
+fs.mkdirSync(path.join(uploads, "cache"), { recursive: true });
+fs.writeFileSync(path.join(uploads, "cache/x.txt"), "cache");
+fs.mkdirSync(path.join(uploads, "backwpup-abc123"), { recursive: true });
+fs.writeFileSync(path.join(uploads, "backwpup-abc123/zaloha.zip"), "jiny plugin");
+const mediaCount = Object.keys(media).length;
 fs.copyFileSync(klicenkaPhp, path.join(mu, "klicenka.php"));
 fs.copyFileSync(path.join(pluginDir, "klicenka-udrzba.php"), path.join(mu, "klicenka-udrzba.php"));
 fs.copyFileSync(path.join(here, "test-helper.php"), path.join(mu, "zz-test-helper.php"));
@@ -64,7 +82,7 @@ makeZip("plugin-3.0.0-broken.zip", { "kut-dummy/kut-dummy.php": pluginCode("3.0.
 makeZip("theme-1.1.0.zip", { "kut-theme/style.css": themeCss("1.1.0"), "kut-theme/index.php": "<?php // v1.1\n" });
 
 const steps = [
-  { step: "defineWpConfigConsts", consts: { KLICENKA_AUDIENCE: "example-wordpress", KLICENKA_ENVIRONMENT: "local", KLICENKA_ISSUER: ISSUER } },
+  { step: "defineWpConfigConsts", consts: { KLICENKA_AUDIENCE: "example-wordpress", KLICENKA_ENVIRONMENT: "local", KLICENKA_ISSUER: ISSUER, UPLOADS: "wp-content/media/uploads" } },
   { step: "setSiteOptions", options: { blogname: "Původní název" } },
   { step: "mkdir", path: "/wordpress/wp-content/plugins/kut-dummy" },
   { step: "writeFile", path: "/wordpress/wp-content/plugins/kut-dummy/kut-dummy.php", data: pluginCode("1.0.0", "function kut_dummy_v1() { return 1; }") },
@@ -77,20 +95,55 @@ fs.writeFileSync(path.join(tmp, "blueprint.json"), JSON.stringify({ steps, featu
 const wpLog = fs.openSync(path.join(tmp, "playground.log"), "a");
 // Víc workerů: kontrola webu po aktualizaci volá stejný web, zatímco první požadavek ještě běží.
 const child = spawn("npx", ["-y", "@wp-playground/cli@3.1.60", "server", `--port=${WP_PORT}`,
-  `--mount=${mu}:/wordpress/wp-content/mu-plugins`, `--mount=${zalohy}:/wordpress/wp-content/klicenka-zalohy`, `--mount=${zips}:/kut-zips`,
+  `--mount=${mu}:/wordpress/wp-content/mu-plugins`, `--mount=${zalohy}:/wordpress/wp-content/klicenka-zalohy`, `--mount=${zips}:/kut-zips`, `--mount=${mediaMount}:/wordpress/wp-content/media`,
   `--blueprint=${path.join(tmp, "blueprint.json")}`, "--workers=3", `--php=${process.env.PHP_VERSION || "8.3"}`], { stdio: ["ignore", wpLog, wpLog], detached: true });
 let stopped = false;
 function stop() { if (stopped) return; stopped = true; try { process.kill(-child.pid, "SIGTERM"); } catch {} jwks.close(); if (!keep) fs.rmSync(tmp, { recursive: true, force: true }); else console.log(`  ponecháno: ${tmp}`); }
 process.on("SIGINT", () => { stop(); process.exit(130); });
 
 const api = (r) => `${WP}/?rest_route=/klicenka-udrzba/v1/${r}`;
-const METHOD = { zaloha: "POST", aktualizace: "POST", obnova: "POST", zalohy: "GET" };
+const METHOD = { zaloha: "POST", aktualizace: "POST", obnova: "POST", zalohy: "GET", stahnout: "GET", uvolnit: "POST" };
 async function call(route, token, extra = "") {
   const r = await fetch(api(route) + extra, { method: METHOD[route], headers: token ? { authorization: `Bearer ${token}` } : {} });
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch {}
   return { status: r.status, json: j, text: t };
 }
 const run = (akce, req = {}, claims = {}) => call(akce, sign(akce, req, claims));
+/** Stažení souboru zálohy (syrová data), volitelně s hlavičkou Range. */
+async function download(token, range) {
+  const r = await fetch(api("stahnout") + `&_=${Date.now()}`, { headers: { authorization: `Bearer ${token}`, ...(range ? { range } : {}) } });
+  return { status: r.status, headers: r.headers, body: Buffer.from(await r.arrayBuffer()) };
+}
+/** Jednoduché čtení zipu (centrální adresář, bez ZIP64): jméno → {method, data()}; unzip v macOS kazí UTF-8 jména. */
+function readZip(file) {
+  const b = fs.readFileSync(file);
+  let e = b.length - 22;
+  while (e >= 0 && b.readUInt32LE(e) !== 0x06054b50) e--;
+  if (e < 0) throw new Error(`není zip: ${file}`);
+  const n = b.readUInt16LE(e + 10);
+  let p = b.readUInt32LE(e + 16);
+  const out = new Map();
+  for (let i = 0; i < n; i++) {
+    const method = b.readUInt16LE(p + 10), csize = b.readUInt32LE(p + 20), nl = b.readUInt16LE(p + 28), xl = b.readUInt16LE(p + 30), cl = b.readUInt16LE(p + 32), off = b.readUInt32LE(p + 42);
+    const name = b.subarray(p + 46, p + 46 + nl).toString("utf8");
+    out.set(name, { method, data: () => { const start = off + 30 + b.readUInt16LE(off + 26) + b.readUInt16LE(off + 28); const raw = b.subarray(start, start + csize); return method === 8 ? zlib.inflateRawSync(raw) : raw; } });
+    p += 46 + nl + xl + cl;
+  }
+  return out;
+}
+/** Záloha po krocích: volá „zaloha“ s req.krok, dokud není hotovo. */
+async function chunked(req, max = 300) {
+  const out = { steps: 0, job: null, backup: null, last: null };
+  while (out.steps < max) {
+    const r = await run("zaloha", { krok: true, ...req });
+    out.steps++;
+    out.last = r;
+    if (r.status !== 200 || !r.json?.ok) return out;
+    if (r.json.done) { out.backup = r.json.backup; return out; }
+    out.job = r.json.job;
+  }
+  return out;
+}
 const state = async () => (await fetch(`${WP}/?rest_route=/kut/v1/state&_=${Date.now()}`)).json();
 const set = (o) => fetch(`${WP}/?rest_route=/kut/v1/set`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(o) });
 const homeOk = async () => { const r = await fetch(`${WP}/?_=${Date.now()}`); const t = await r.text(); return r.status === 200 && !/critical error|Fatal error/i.test(t); };
@@ -197,6 +250,87 @@ try {
   r = await run("zalohy");
   check("drží se poslední 3 zálohy", r.json?.backups?.length === 3 && !r.json.backups.some((b) => b.id === A?.id), r.json?.backups?.map((b) => b.id));
   check("na disku zůstaly jen 3 složky záloh", fs.readdirSync(root).filter((n) => /^\d{8}-\d{6}-/.test(n)).length === 3, fs.readdirSync(root));
+
+  console.log("Záloha po krocích s médii");
+  const hashOf = (b) => crypto.createHash("sha256").update(b).digest("hex");
+  const req = { uploads: true, kind: "mimo-hosting", budget: 1, part: 1048576, partFiles: 200 };
+  const first = await run("zaloha", { krok: true, ...req });
+  check("první krok: rozpracováno, ne hotovo", first.status === 200 && first.json?.done === false && first.json?.job?.phase && /^\d{8}-\d{6}-/.test(first.json?.job?.id ?? ""), first.json ?? first.text);
+  r = await run("zalohy");
+  check("seznam ukazuje rozpracovanou zálohu", r.json?.job?.id === first.json?.job?.id && !r.json?.backups?.some((b) => b.id === first.json?.job?.id), r.json?.job);
+  check("aktualizace během rozpracované zálohy 409", (await run("aktualizace", { items: [{ type: "plugin", slug: "kut-dummy" }] })).status === 409);
+  check("obnova během rozpracované zálohy 409", (await call("obnova", sign("obnova", { backup: r.json?.backups?.[0]?.id, db: true }, { confirm: `obnovit:${r.json?.backups?.[0]?.id}` }))).status === 409);
+  check("jiná záloha po krocích (bez médií) mezitím 409", (await run("zaloha", { krok: true, uploads: false })).status === 409);
+  check("rozpracovanou zálohu nejde stáhnout (404)", (await download(sign("stahnout", { backup: first.json?.job?.id, file: "db.sql.gz" }))).status === 404);
+  const C = await chunked(req);
+  const cb = C.backup;
+  check("záloha po krocích doběhla (víc kroků, stejná záloha)", !!cb && C.steps + 1 >= 2 && cb.id === first.json?.job?.id && cb.chunked === true && cb.kind === "mimo-hosting" && cb.uploads === true, { steps: C.steps, last: C.last?.json ?? C.last?.text });
+  const cdir = path.join(root, cb?.id ?? "x");
+  const zipParts = (cb?.files ?? []).filter((f) => /^soubory(-\d{3})?\.zip$/.test(f.name));
+  check("soubory ve víc částech zipu (soubory.zip, soubory-002.zip, …)", zipParts.length >= 5 && zipParts[0].name === "soubory.zip" && zipParts[1]?.name === "soubory-002.zip", cb?.files?.map((f) => f.name));
+  check("otisky všech částí sedí", (cb?.files ?? []).every((f) => fs.existsSync(path.join(cdir, f.name)) && hashOf(fs.readFileSync(path.join(cdir, f.name))) === f.sha256 && fs.statSync(path.join(cdir, f.name)).size === f.size), cb?.files);
+  check("po dokončení žádný job.json ani seznam.txt", !fs.existsSync(path.join(cdir, "job.json")) && !fs.existsSync(path.join(cdir, "seznam.txt")) && fs.existsSync(path.join(cdir, "manifest.json")), fs.readdirSync(cdir));
+  const sqlC = zlib.gunzipSync(fs.readFileSync(path.join(cdir, "db.sql.gz"))).toString("utf8");
+  check("db.sql.gz celá (gzip z víc kroků), značka konce", /INSERT INTO/.test(sqlC) && sqlC.endsWith("-- konec zálohy\n") && sqlC.split("-- konec zálohy").length === 2, sqlC.slice(-200));
+  const inZip = new Map();
+  for (const p of zipParts) for (const [n, entry] of readZip(path.join(cdir, p.name))) inZip.set(n, entry);
+  const mediaRels = Object.keys(media);
+  check(`všech ${mediaCount} souborů médií je v částech`, mediaRels.every((rel) => inZip.has(`uploads/${rel}`)), mediaRels.filter((rel) => !inZip.has(`uploads/${rel}`)).slice(0, 5));
+  check("i pluginy, šablony a prázdná složka", inZip.has("plugins/kut-dummy/kut-dummy.php") && inZip.has("themes/kut-theme/style.css") && inZip.has("uploads/2024/02/prazdna/"), [...inZip.keys()].filter((n) => !n.startsWith("uploads/2")).slice(0, 20));
+  check("mezipaměť a zálohy jiných pluginů vynechané", ![...inZip.keys()].some((n) => n.startsWith("uploads/cache/") || n.startsWith("uploads/backwpup-")), [...inZip.keys()].filter((n) => /cache|backwpup/.test(n)));
+  const sample = ["2024/03/velka-3.jpg", "2025/06/text 7 á.txt", "2024/01/foto-599.jpg"];
+  check("obsah souborů v zipu sedí s originálem", sample.every((rel) => inZip.has(`uploads/${rel}`) && hashOf(inZip.get(`uploads/${rel}`).data()) === hashOf(media[rel])));
+  check("fotky se jen ukládají (stored), text se komprimuje (deflate)", inZip.get("uploads/2024/03/velka-3.jpg")?.method === 0 && inZip.get("uploads/2025/06/text 7 á.txt")?.method === 8, [inZip.get("uploads/2024/03/velka-3.jpg")?.method, inZip.get("uploads/2025/06/text 7 á.txt")?.method]);
+
+  console.log("Stažení zálohy");
+  const big = zipParts.reduce((a, b) => (b.size > a.size ? b : a), zipParts[0]);
+  const bigBuf = fs.readFileSync(path.join(cdir, big.name));
+  let d = await download(sign("stahnout", { backup: cb?.id, file: big.name }));
+  check("celé stažení 200, otisk sedí, hlavičky", d.status === 200 && hashOf(d.body) === big.sha256 && d.headers.get("x-klicenka-sha256") === big.sha256 && d.headers.get("accept-ranges") === "bytes" && Number(d.headers.get("content-length")) === big.size, { status: d.status, len: d.body.length, size: big.size, ct: d.headers.get("content-type") });
+  d = await download(sign("stahnout", { backup: cb?.id, file: big.name }), "bytes=10-109");
+  check("Range bytes=10-109 → 206, 100 B, Content-Range", d.status === 206 && d.body.length === 100 && d.body.equals(bigBuf.subarray(10, 110)) && d.headers.get("content-range") === `bytes 10-109/${big.size}`, { status: d.status, len: d.body.length, cr: d.headers.get("content-range") });
+  const half = Math.floor(big.size / 2);
+  const d1 = await download(sign("stahnout", { backup: cb?.id, file: big.name }), `bytes=0-${half - 1}`);
+  const d2 = await download(sign("stahnout", { backup: cb?.id, file: big.name }), `bytes=${half}-`);
+  check("přerušené stahování naváže (dvě půlky = celý soubor)", d1.status === 206 && d2.status === 206 && hashOf(Buffer.concat([d1.body, d2.body])) === big.sha256, { s1: d1.status, s2: d2.status, l1: d1.body.length, l2: d2.body.length });
+  d = await download(sign("stahnout", { backup: cb?.id, file: big.name }), "bytes=-50");
+  check("Range bytes=-50 → posledních 50 B", d.status === 206 && d.body.equals(bigBuf.subarray(big.size - 50)), { status: d.status, len: d.body.length });
+  check("Range za koncem → 416", (await download(sign("stahnout", { backup: cb?.id, file: big.name }), `bytes=${big.size}-`)).status === 416);
+  const dbp = cb?.files?.find((f) => f.name === "db.sql.gz");
+  d = await download(sign("stahnout", { backup: cb?.id, file: "db.sql.gz" }));
+  check("stažení db.sql.gz sedí", d.status === 200 && hashOf(d.body) === dbp?.sha256);
+  d = await download(sign("stahnout", { backup: cb?.id, file: "manifest.json" }));
+  check("stažení manifest.json (popis pro obnovu)", d.status === 200 && JSON.parse(d.body.toString()).id === cb?.id && JSON.parse(d.body.toString()).complete === true);
+  const dt = sign("stahnout", { backup: cb?.id, file: "db.sql.gz" });
+  await download(dt);
+  check("stejný token ke stažení podruhé 401", (await download(dt)).status === 401);
+  check("token se scope stav 403", (await download(sign("stahnout", { backup: cb?.id, file: "db.sql.gz" }, { scope: "stav" }))).status === 403);
+  check("token pro jinou akci (seznam) 403", (await download(sign("zalohy", { backup: cb?.id, file: "db.sql.gz" }))).status === 403);
+  check("token na stažení neotevře zálohu ani obnovu (403)", (await call("zaloha", sign("stahnout", { uploads: true }))).status === 403 && (await call("obnova", sign("stahnout", { backup: cb?.id, db: true }, { confirm: `obnovit:${cb?.id}` }))).status === 403);
+  check("přihlašovací token ke stažení 401", (await download(sign("stahnout", { backup: cb?.id, file: "db.sql.gz" }, {}, { typ: "klicenka+jwt" }))).status === 401);
+  check("neexistující část 404", (await download(sign("stahnout", { backup: cb?.id, file: "soubory-999.zip" }))).status === 404);
+  check("cesta mimo zálohu 400", (await download(sign("stahnout", { backup: cb?.id, file: "../stav.json" }))).status === 400 && (await download(sign("stahnout", { backup: "../x", file: "db.sql.gz" }))).status === 400);
+  check("stav.json ani job.json stáhnout nejde (400)", (await download(sign("stahnout", { backup: cb?.id, file: "stav.json" }))).status === 400 && (await download(sign("stahnout", { backup: cb?.id, file: "job.json" }))).status === 400);
+
+  console.log("Druhá záloha s médii, uvolnění místa, obnova z víc částí");
+  const D = await chunked({ ...req, budget: 5 });
+  check("druhá záloha po krocích hotová", !!D.backup && D.backup.id !== cb?.id, D.last?.json ?? D.last?.text);
+  r = await run("uvolnit", { backup: D.backup?.id });
+  check("uvolnit nejnovější: označí, nic nesmaže", r.status === 200 && r.json?.deleted?.length === 0 && r.json?.newest === D.backup?.id && fs.existsSync(path.join(root, D.backup?.id ?? "x")), r.json ?? r.text);
+  r = await run("uvolnit", { backup: cb?.id });
+  check("uvolnit starší zálohu s médii: smaže ji, nejnovější zůstane", r.status === 200 && r.json?.deleted?.includes(cb?.id) && !fs.existsSync(cdir) && fs.existsSync(path.join(root, D.backup?.id ?? "x")), r.json ?? r.text);
+  check("uvolnit neexistující 404", (await run("uvolnit", { backup: cb?.id })).status === 404);
+  r = await run("zalohy");
+  check("seznam: nejnovější označená offsite, bez rozpracované", r.json?.backups?.[0]?.id === D.backup?.id && !!r.json?.backups?.[0]?.offsite && r.json?.job === null, r.json?.backups?.map((b) => [b.id, b.offsite]));
+  fs.rmSync(path.join(uploads, "2024/03/velka-3.jpg"));
+  fs.writeFileSync(path.join(uploads, "2025/06/text 7 á.txt"), "přepsáno");
+  fs.writeFileSync(path.join(uploads, "nove-po-zaloze.txt"), "x");
+  const Did = D.backup?.id;
+  r = await call("obnova", sign("obnova", { backup: Did, db: true, files: true }, { confirm: `obnovit:${Did}` }));
+  check("obnova ze zálohy po krocích (víc částí) 200", r.status === 200 && r.json?.ok && r.json?.files === "ok" && r.json?.db === "ok", r.json ?? r.text);
+  check("média po obnově zpět (smazaný i přepsaný soubor)", fs.existsSync(path.join(uploads, "2024/03/velka-3.jpg")) && hashOf(fs.readFileSync(path.join(uploads, "2024/03/velka-3.jpg"))) === hashOf(media["2024/03/velka-3.jpg"]) && fs.readFileSync(path.join(uploads, "2025/06/text 7 á.txt")).equals(media["2025/06/text 7 á.txt"]));
+  check("soubor přidaný po záloze po obnově není", !fs.existsSync(path.join(uploads, "nove-po-zaloze.txt")));
+  check("po obnově všech médií stejně", Object.entries(media).every(([rel, buf]) => fs.existsSync(path.join(uploads, rel)) && fs.statSync(path.join(uploads, rel)).size === buf.length));
   check("web na konci běží", await homeOk());
 } catch (e) {
   fail++; console.log(`\n✘ ${e.stack ?? e.message}`);
