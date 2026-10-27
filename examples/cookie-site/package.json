@@ -6,7 +6,7 @@
   "dependencies": {
     "@mypixel/klicenka": "file:../..",
     "jose": "^6.2.12",
-    "next": "16.4.0",
+    "next": "16.4.3",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
