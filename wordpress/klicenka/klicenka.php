@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.4.1
+ * Version: 1.5.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -19,13 +19,16 @@
  * Od 1.4.0 se sám aktualizuje: jednou denně (a hned po kliknutí v trackeru) stáhne z trackeru seznam souborů
  * podepsaný klíčem Klíčenky, ověří podpis, otisky i syntaxi PHP a nahradí soubory v mu-plugins. Předchozí verze
  * zůstane vedle s příponou .prev. Vypnout: define('KLICENKA_AUTO_UPDATE', false);
+ *
+ * Od 1.5.0 smí aktualizace přidat i klicenka-udrzba.php (zálohy a aktualizace WordPressu na pokyn z trackeru);
+ * přidá se jen na výslovný pokyn (claim "install"), sám od sebe nikdy.
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.4.1');
+define('KLICENKA_PLUGIN_VERSION', '1.5.0');
 
 function klicenka_config()
 {
@@ -288,6 +291,9 @@ function klicenka_status()
     $out = array('name' => 'klicenka', 'version' => KLICENKA_PLUGIN_VERSION, 'protocol' => 1, 'adapter' => 'wordpress');
     // Od 1.4.0: jestli je nainstalovaný plugin pro úpravy Claudem a zda se web umí sám aktualizovat.
     $out['upravy'] = file_exists(__DIR__ . '/klicenka-upravy.php');
+    // Od 1.5.0: jestli je nainstalovaný doplněk údržby (zálohy, aktualizace) a stav.
+    $out['stav'] = file_exists(__DIR__ . '/klicenka-stav.php');
+    $out['udrzba'] = file_exists(__DIR__ . '/klicenka-udrzba.php');
     $out['autoUpdate'] = !(defined('KLICENKA_AUTO_UPDATE') && !KLICENKA_AUTO_UPDATE);
     // The identifier and environment are the token's audience — public, and the
     // tracker reads them when the site is added.
@@ -307,7 +313,7 @@ add_action('wp_ajax_klicenka_status', 'klicenka_status');
 /** Soubory, které smí aktualizace měnit (jen v adresáři tohoto mu-pluginu). */
 function klicenka_update_allowed()
 {
-    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php');
+    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php', 'klicenka-udrzba.php');
 }
 
 /** Podepsaný manifest z trackeru: {payload: base64url(JSON), kid, sig}. Vrací ověřený obsah, nebo WP_Error. */
