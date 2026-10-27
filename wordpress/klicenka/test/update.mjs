@@ -14,6 +14,7 @@ const wp = path.resolve(here, "../..");
 const NEW = fs.readFileSync(path.join(wp, "klicenka/klicenka.php"), "utf8");
 const UPRAVY = fs.readFileSync(path.join(wp, "klicenka-upravy/klicenka-upravy.php"), "utf8");
 const STAV = fs.readFileSync(path.join(wp, "klicenka-stav/klicenka-stav.php"), "utf8");
+const UDRZBA = fs.readFileSync(path.join(wp, "klicenka-udrzba/klicenka-udrzba.php"), "utf8");
 const NEW_VERSION = NEW.match(/Version:\s*([\d.]+)/)[1];
 // „Stará“ kopie = nová s jinou verzí v hlavičce (stará 1.2 by se sama aktualizovat neuměla).
 const OLD = NEW.replace(`define('KLICENKA_PLUGIN_VERSION', '${NEW_VERSION}')`, "define('KLICENKA_PLUGIN_VERSION', '1.4.0-old')");
@@ -25,7 +26,7 @@ const keep = process.argv.includes("--keep");
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const otherKey = crypto.generateKeyPairSync("ed25519").privateKey;
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "test1", alg: "EdDSA", use: "sig" };
-let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV };
+let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA };
 let mode = "ok"; // ok | badsig | stale | badhash | syntax
 const sha = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 function manifest() {
@@ -108,6 +109,7 @@ try {
   r = await update(token());
   check("platná aktualizace: klicenka.php i klicenka-stav.php", r.json?.ok && r.json.updated.includes("klicenka.php") && r.json.updated.includes("klicenka-stav.php") && read("klicenka.php") === NEW && read("klicenka-stav.php") === STAV, r.json);
   check("klicenka-upravy.php bez pokynu nepřibyl", read("klicenka-upravy.php") === null);
+  check("klicenka-udrzba.php bez pokynu nepřibyl", read("klicenka-udrzba.php") === null && (await status()).udrzba === false);
   check("předchozí verze uložena jako .prev", read("klicenka.php.prev") === OLD);
   check("žádné .new po aktualizaci", !fs.readdirSync(mu).some((f) => f.endsWith(".new")));
   const st = await status();
@@ -118,6 +120,11 @@ try {
   r = await update(token({ install: ["klicenka-upravy.php", "../wp-config.php", "evil.php"] }));
   check("install přidá jen povolený soubor", r.json?.ok && read("klicenka-upravy.php") === UPRAVY && !fs.existsSync(path.join(mu, "evil.php")), r.json);
   check("stav hlásí upravy: true", (await status()).upravy === true);
+  r = await update(token({ install: ["klicenka-udrzba.php"] }));
+  check("install přidá klicenka-udrzba.php", r.json?.ok && read("klicenka-udrzba.php") === UDRZBA && (await status()).udrzba === true, r.json);
+  check("web s klicenka-udrzba běží (pasivní)", (await fetch(`${WP}/`)).status === 200);
+  const pas = await fetch(`${WP}/?rest_route=/klicenka-udrzba/v1/zalohy`);
+  check("údržba bez tokenu 401", pas.status === 401);
   const t = token();
   await update(t);
   check("stejný token podruhé 401", (await update(t)).status === 401);
