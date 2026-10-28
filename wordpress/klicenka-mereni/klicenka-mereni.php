@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – měření návštěvnosti
  * Description: Vloží do hlavičky webu měřicí skript Project Trackeru (MYPIXEL), bez cookies a bez lišty se souhlasem. Nic jiného nedělá.
- * Version: 0.1.1
+ * Version: 0.1.2
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -26,7 +26,7 @@ if (defined('KLICENKA_MERENI_VERSION')) {
     return;
 }
 
-define('KLICENKA_MERENI_VERSION', '0.1.1');
+define('KLICENKA_MERENI_VERSION', '0.1.2');
 
 function klicenka_mereni_enabled()
 {
@@ -94,6 +94,10 @@ function klicenka_mereni_present($src)
 function klicenka_mereni_purge_all()
 {
     try {
+        // Serverová mezipaměť LiteSpeed (Hostinger) i bez pluginu LiteSpeed Cache: pokyn v hlavičce odpovědi.
+        if (!headers_sent()) {
+            header('X-LiteSpeed-Purge: *');
+        }
         do_action('litespeed_purge_all');
         if (function_exists('rocket_clean_domain')) {
             rocket_clean_domain();
