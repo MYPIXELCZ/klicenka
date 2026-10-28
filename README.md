@@ -19,9 +19,20 @@ seznam souborů podepsaný klíčem Klíčenky, ověří podpis, otisky SHA-256 
 (předchozí verze zůstane jako `.prev`). Novou verzi vydáš tak, že v trackeru spustíš `node scripts/klicenka-wp-sync.mjs`
 a nasadíš ho. Vypnutí na webu: `define('KLICENKA_AUTO_UPDATE', false);`.
 
-Nové soubory se na web přidávají jen na pokyn z trackeru (claim `install`), s jedinou výjimkou: od 1.6.0 se sám
-přidá `klicenka-overeni.php`, který jen vypíše značku `google-site-verification` z trackeru
-(`/api/gsc-overeni?host=…`), aby šel web ověřit a přidat do Search Console. Vypnutí: `define('KLICENKA_GSC_VERIFY', false);`.
+Nové soubory se na web přidávají jen na pokyn z trackeru (claim `install`), s výjimkou neškodných doplňků, které jen
+vypisují veřejné údaje:
+
+- od 1.6.0 `klicenka-overeni.php` – značka `google-site-verification` z trackeru (`/api/gsc-overeni?host=…`), aby šel
+  web ověřit a přidat do Search Console. Vypnutí: `define('KLICENKA_GSC_VERIFY', false);`.
+- od 1.7.0 `klicenka-mereni.php` – měřicí skript trackeru `<script defer src="<issuer>/n.js" data-site="<KLICENKA_AUDIENCE>">`
+  (bez cookies, bez lišty se souhlasem; sběr na `<issuer>/api/n`). Nevypisuje se přihlášeným s právem upravovat obsah,
+  v administraci, kanálech, REST, AMP, náhledech, přizpůsobení vzhledu a embedech; na stránce jen jednou (konstanta
+  `KLICENKA_TRAFFIC_TAG`, n.js zařazený přes `wp_enqueue_script`). Tag jde přes `wp_print_script_tag`, takže pluginy
+  s CSP mu přidají nonce; přísná CSP bez nich musí povolit `script-src` a `connect-src` pro tracker.
+  Vypnutí: `define('KLICENKA_TRAFFIC', false);`.
+
+Nový soubor přidá až samoaktualizace, která už běží s jeho verzí `klicenka.php` (web na 1.6.0 tedy dostane
+`klicenka-mereni.php` druhým během po aktualizaci na 1.7.0). V balíčku pluginu (`inc/`) je načte `klicenka.php`.
 
 ## Verze
 
@@ -31,7 +42,8 @@ Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verz
   tagy `vX.Y.Z` (např. `v1.2.0`). Zvyšuje se jen při změně kódu balíčku.
 - **WordPress mu-plugin** (`wordpress/klicenka/klicenka.php`) – verze v hlavičce `Version:`
   a v `KLICENKA_PLUGIN_VERSION`, tagy `wp-X.Y.Z` (např. `wp-1.4.1`).
-- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`, `klicenka-udrzba`, `klicenka-overeni`) – každý má verzi
+- **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`, `klicenka-udrzba`, `klicenka-overeni`,
+  `klicenka-mereni`) – každý má verzi
   ve své hlavičce, zatím bez tagů.
 
 ## Údržba WordPressu a záloha mimo hosting (`klicenka-udrzba` 0.2.0)

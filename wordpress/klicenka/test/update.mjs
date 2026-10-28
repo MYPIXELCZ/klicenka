@@ -16,6 +16,7 @@ const UPRAVY = fs.readFileSync(path.join(wp, "klicenka-upravy/klicenka-upravy.ph
 const STAV = fs.readFileSync(path.join(wp, "klicenka-stav/klicenka-stav.php"), "utf8");
 const UDRZBA = fs.readFileSync(path.join(wp, "klicenka-udrzba/klicenka-udrzba.php"), "utf8");
 const OVERENI = fs.readFileSync(path.join(wp, "klicenka-overeni/klicenka-overeni.php"), "utf8");
+const MERENI = fs.readFileSync(path.join(wp, "klicenka-mereni/klicenka-mereni.php"), "utf8");
 const GSC_TOKEN = "TestZnacka_1234-abcdEF";
 const NEW_VERSION = NEW.match(/Version:\s*([\d.]+)/)[1];
 // „Stará“ kopie = nová s jinou verzí v hlavičce (stará 1.2 by se sama aktualizovat neuměla).
@@ -28,7 +29,7 @@ const keep = process.argv.includes("--keep");
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const otherKey = crypto.generateKeyPairSync("ed25519").privateKey;
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "test1", alg: "EdDSA", use: "sig" };
-let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA, "klicenka-overeni.php": OVERENI };
+let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA, "klicenka-overeni.php": OVERENI, "klicenka-mereni.php": MERENI };
 const gscHosts = [];
 let mode = "ok"; // ok | badsig | stale | badhash | syntax
 const sha = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
@@ -84,6 +85,7 @@ const status = async () => (await fetch(`${WP}/wp-admin/admin-ajax.php?action=kl
 const update = async (t) => { const r = await fetch(`${WP}/wp-admin/admin-ajax.php?action=klicenka_update`, { method: "POST", body: new URLSearchParams({ token: t }) }); return { status: r.status, json: await r.json().catch(() => null) }; };
 const read = (n) => fs.existsSync(path.join(mu, n)) ? fs.readFileSync(path.join(mu, n), "utf8") : null;
 let ok = 0, fail = 0;
+const nTags = (html) => html.match(/<script\b[^>]*\/n\.js"[^>]*>/g) ?? [];
 const check = (n, c, d) => { if (c) { ok++; console.log(`  ✔ ${n}`); } else { fail++; console.log(`  ✘ ${n}  → ${JSON.stringify(d)?.slice(0, 300)}`); } };
 
 try {
@@ -124,6 +126,10 @@ try {
   const before = gscHosts.length;
   await fetch(`${WP}/?_=${Date.now()}`);
   check("značka z uložené hodnoty (tracker podruhé nevolá)", gscHosts.length === before, gscHosts);
+  check("klicenka-mereni.php přibyl sám (neškodný)", r.json.updated.includes("klicenka-mereni.php") && read("klicenka-mereni.php") === MERENI && (await status()).mereni === true, r.json);
+  const tags = nTags(home);
+  check("úvodní stránka má měřicí skript jednou", tags.length === 1, tags);
+  check("měřicí skript: defer, src z issueru, data-site = KLICENKA_AUDIENCE", /\sdefer(=|\s|>)/.test(tags[0] ?? "") && (tags[0] ?? "").includes(`src="${ISSUER}/n.js"`) && (tags[0] ?? "").includes('data-site="example-wordpress"'), tags);
   check("předchozí verze uložena jako .prev", read("klicenka.php.prev") === OLD);
   check("žádné .new po aktualizaci", !fs.readdirSync(mu).some((f) => f.endsWith(".new")));
   const st = await status();
@@ -142,6 +148,14 @@ try {
   const t = token();
   await update(t);
   check("stejný token podruhé 401", (await update(t)).status === 401);
+
+  // Přihlášený správce (přes Klíčenku) měřicí skript nedostane — až na konci, ať přihlášení neovlivní nic jiného.
+  const login = await fetch(`${WP}/wp-login.php?action=klicenka`, { method: "POST", body: new URLSearchParams({ token: token({ sub: "admin" }, { typ: "klicenka+jwt" }) }), redirect: "manual" });
+  const cookie = login.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+  check("přihlášení správce přes Klíčenku", login.status === 302 && cookie.includes("wordpress_logged_in_"), login.status);
+  const adminHome = await (await fetch(`${WP}/?_=${Date.now()}`, { headers: { cookie } })).text();
+  check("přihlášený správce bez měřicího skriptu", adminHome.includes("admin-bar") && nTags(adminHome).length === 0, nTags(adminHome));
+  check("nepřihlášený návštěvník ho dál má", nTags(await (await fetch(`${WP}/?_=${Date.now()}`)).text()).length === 1);
 } catch (e) {
   fail++; console.log(`\n✘ ${e.message}`);
 } finally {

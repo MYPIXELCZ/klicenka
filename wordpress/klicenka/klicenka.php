@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.6.0
+ * Version: 1.7.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -25,13 +25,16 @@
  *
  * Od 1.6.0 přidá sama klicenka-overeni.php (jen vypíše značku google-site-verification z trackeru, aby šel web
  * přidat do Search Console). Vypnout: define('KLICENKA_GSC_VERIFY', false); pak se ani nepřidá.
+ *
+ * Od 1.7.0 přidá sama i klicenka-mereni.php (měřicí skript trackeru <issuer>/n.js bez cookies; nepřihlášeným
+ * a bez práva upravovat). Vypnout: define('KLICENKA_TRAFFIC', false); pak se ani nepřidá.
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.6.0');
+define('KLICENKA_PLUGIN_VERSION', '1.7.0');
 
 function klicenka_config()
 {
@@ -299,6 +302,8 @@ function klicenka_status()
     $out['udrzba'] = file_exists(__DIR__ . '/klicenka-udrzba.php');
     // Od 1.6.0: značka pro ověření v Search Console.
     $out['overeni'] = file_exists(__DIR__ . '/klicenka-overeni.php');
+    // Od 1.7.0: měření návštěvnosti.
+    $out['mereni'] = file_exists(__DIR__ . '/klicenka-mereni.php');
     $out['autoUpdate'] = !(defined('KLICENKA_AUTO_UPDATE') && !KLICENKA_AUTO_UPDATE);
     // The identifier and environment are the token's audience — public, and the
     // tracker reads them when the site is added.
@@ -318,16 +323,24 @@ add_action('wp_ajax_klicenka_status', 'klicenka_status');
 /** Soubory, které smí aktualizace měnit (jen v adresáři tohoto mu-pluginu). */
 function klicenka_update_allowed()
 {
-    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php', 'klicenka-udrzba.php', 'klicenka-overeni.php');
+    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php', 'klicenka-udrzba.php', 'klicenka-overeni.php', 'klicenka-mereni.php');
 }
 
 /**
  * Soubory, které aktualizace přidá i bez pokynu (1.6.0): jen neškodné, co nic nemění a vypisují veřejné údaje.
  * klicenka-overeni.php = značka pro Search Console; vypnuté přes KLICENKA_GSC_VERIFY se nepřidá.
+ * klicenka-mereni.php (1.7.0) = měřicí skript trackeru; vypnuté přes KLICENKA_TRAFFIC se nepřidá.
  */
 function klicenka_update_auto()
 {
-    return (defined('KLICENKA_GSC_VERIFY') && !KLICENKA_GSC_VERIFY) ? array() : array('klicenka-overeni.php');
+    $auto = array();
+    if (!(defined('KLICENKA_GSC_VERIFY') && !KLICENKA_GSC_VERIFY)) {
+        $auto[] = 'klicenka-overeni.php';
+    }
+    if (!(defined('KLICENKA_TRAFFIC') && !KLICENKA_TRAFFIC)) {
+        $auto[] = 'klicenka-mereni.php';
+    }
+    return $auto;
 }
 
 /** Podepsaný manifest z trackeru: {payload: base64url(JSON), kid, sig}. Vrací ověřený obsah, nebo WP_Error. */
@@ -473,4 +486,8 @@ add_action('wp_ajax_klicenka_update', 'klicenka_update_now');
 // Značka pro Search Console (1.6.0). V mu-plugins ji WordPress načte sám; v balíčku pluginu (inc/) ji načte až tohle.
 if (file_exists(__DIR__ . '/klicenka-overeni.php')) {
     require_once __DIR__ . '/klicenka-overeni.php';
+}
+// Měření návštěvnosti (1.7.0), stejně tak.
+if (file_exists(__DIR__ . '/klicenka-mereni.php')) {
+    require_once __DIR__ . '/klicenka-mereni.php';
 }
