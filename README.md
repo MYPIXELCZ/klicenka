@@ -46,7 +46,7 @@ Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verz
   `klicenka-mereni`) – každý má verzi
   ve své hlavičce, zatím bez tagů.
 
-## Údržba WordPressu a záloha mimo hosting (`klicenka-udrzba` 0.2.0)
+## Údržba WordPressu a záloha mimo hosting (`klicenka-udrzba` 0.3.0)
 
 Pasivní doplněk: dělá jen to, co nese podepsaný token z trackeru (typ `klicenka-udrzba+jwt`, scope `udrzba`, 60 s,
 jednorázový, akce = endpoint). Zálohy na hostingu (`wp-content/klicenka-zalohy/<náhodná složka>/<id>/`: `db.sql.gz`,
@@ -57,6 +57,13 @@ jednorázový, akce = endpoint). Zálohy na hostingu (`wp-content/klicenka-zaloh
   se nejdřív sepíší a pak balí do částí zipu, které se po zavření už neotvírají — gigabajty médií tak projdou i na
   hostingu s limitem PHP 30–60 s. Fotky a jiné zkomprimované soubory se do zipu jen ukládají. Mezipaměti a zálohy
   jiných pluginů v uploads se vynechávají (filtr `klicenka_udrzba_vynechat_uploads`).
+- **Celý web (0.3.0):** databáze = všechny tabulky webu, i bez prefixu (kromě tabulek jiné instalace WordPressu
+  ve stejné databázi), pohledy bez DEFINER; soubory = `plugins/`, `themes/`, `uploads/` + `wp-content/` (zbytek
+  wp-content: mu-plugins, languages, fonts, drop-iny…, bez mezipamětí a záloh, filtr `klicenka_udrzba_vynechat_ostatni`)
+  + `koren/` (kořen webu bez `wp-admin`/`wp-includes`: `wp-config.php`, `.htaccess`, ověřovací soubory, další složky;
+  podsložka s vlastním `wp-config.php` = jiný web, vynechá se) + `nad-korenem/wp-config.php`, když leží o složku výš.
+  Obnova z trackeru vrací dál jen plugins/themes/uploads a databázi; zbytek je pro obnovu od nuly (README Záloh).
+  Manifest navíc: `roots`, `wpConfig`, `db.perTable` (řádky po tabulkách), `db.otherInstalls`, `filesInfo.unreadable`.
 - **Stažení** (`stahnout`, GET): jeden soubor hotové zálohy podle `req.backup` + `req.file`, s HTTP Range (206).
 - **Uvolnění** (`uvolnit`): záloha je mimo hosting → označí se a smažou se starší místní zálohy s médii, které už
   mimo hosting jsou. Nejnovější záloha zůstává vždy.

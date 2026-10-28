@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – údržba webu
  * Description: Zálohy a bezpečné aktualizace WordPressu, pluginů a šablon na pokyn z Project Trackeru (MYPIXEL). Bez platného podepsaného tokenu nedělá nic.
- * Version: 0.2.0
+ * Version: 0.3.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -12,7 +12,9 @@
  *   parametry v podepsaném claimu "req" (tělo požadavku se nečte). Posílá se v "Authorization: Bearer …".
  *
  * Endpointy (?rest_route=/klicenka-udrzba/v1/…):
- *   POST zaloha       – záloha DB (.sql.gz) a wp-content/plugins + themes (soubory.zip, uploads jen na přání) na hostingu;
+ *   POST zaloha       – záloha DB (.sql.gz: tabulky webu i bez prefixu, pohledy) a souborů (soubory.zip): plugins, themes,
+ *                       uploads (jen na přání), ostatní wp-content (mu-plugins, languages, …), soubory v kořeni webu
+ *                       (wp-config.php, .htaccess, …; od 0.3.0, kvůli obnově od nuly — obnova z trackeru je nevrací);
  *                       s req.krok po krocích (každé volání pracuje nejvýš req.budget s, stav v <id>/job.json, další volání
  *                       pokračuje) — tak projdou i gigabajty médií na hostingu s limitem PHP 30–60 s
  *   POST aktualizace  – pro každou položku: čerstvá záloha (≤ 1 h), kopie položky, aktualizace, kontrola webu, při chybě návrat
@@ -34,7 +36,7 @@ if (defined('KLICENKA_UDRZBA_VERSION')) {
     return; // načteno podruhé (mu-plugins i plugin)
 }
 
-define('KLICENKA_UDRZBA_VERSION', '0.2.0');
+define('KLICENKA_UDRZBA_VERSION', '0.3.0');
 define('KLICENKA_UDRZBA_TYP', 'klicenka-udrzba+jwt');
 /** Kolik hotových záloh nechat. */
 define('KLICENKA_UDRZBA_KEEP', 3);
@@ -522,21 +524,72 @@ function klicenka_udrzba_ident($name)
     return '`' . str_replace('`', '``', (string) $name) . '`';
 }
 
-/** Tabulky tohoto WordPressu (podle prefixu). */
-function klicenka_udrzba_tables()
+/**
+ * Tabulky a pohledy tohoto WordPressu: všechny s jeho prefixem i ty bez prefixu (pluginy, které prefix
+ * nepoužívají, vlastní tabulky), kromě tabulek JINÉ instalace WordPressu ve stejné databázi (jiný prefix
+ * s vlastními options a posts) — ty patří k jinému webu a obnova téhle zálohy na ně nesmí sáhnout.
+ * @return array{tables: string[], views: string[], other: string[]}
+ */
+function klicenka_udrzba_db_objects()
 {
     global $wpdb;
-    $tables = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'));
-    return array_values(array_filter((array) $tables, 'is_string'));
+    $rows = $wpdb->get_results('SHOW FULL TABLES', ARRAY_N);
+    if (!$rows) {
+        $rows = $wpdb->get_results('SHOW TABLES', ARRAY_N); // databáze bez FULL (např. SQLite ve WP Playground)
+    }
+    $all = array();
+    foreach ((array) $rows as $r) {
+        if (isset($r[0]) && is_string($r[0])) {
+            $all[$r[0]] = strtoupper((string) ($r[1] ?? 'BASE TABLE'));
+        }
+    }
+    $prefix = (string) $wpdb->base_prefix;
+    $other = array();
+    foreach (array_keys($all) as $t) {
+        if (substr($t, -7) !== 'options') {
+            continue;
+        }
+        $p = substr($t, 0, -7);
+        if ($p !== '' && strpos($p, $prefix) !== 0 && isset($all[$p . 'posts'])) {
+            $other[] = $p;
+        }
+    }
+    $tables = array();
+    $views = array();
+    foreach ($all as $t => $type) {
+        if (strpos($t, $prefix) !== 0) {
+            foreach ($other as $p) {
+                if (strpos($t, $p) === 0) {
+                    continue 2;
+                }
+            }
+        }
+        if ($type === 'VIEW') {
+            $views[] = $t;
+        } else {
+            $tables[] = $t;
+        }
+    }
+    return array('tables' => $tables, 'views' => $views, 'other' => $other);
+}
+
+/** Tabulky tohoto WordPressu (bez pohledů). */
+function klicenka_udrzba_tables()
+{
+    $o = klicenka_udrzba_db_objects();
+    return $o['tables'];
 }
 
 function klicenka_udrzba_db_size()
 {
     global $wpdb;
-    $rows = $wpdb->get_results($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'), ARRAY_A);
+    $mine = array_flip(klicenka_udrzba_tables());
+    $rows = $wpdb->get_results('SHOW TABLE STATUS', ARRAY_A);
     $size = 0;
     foreach ((array) $rows as $r) {
-        $size += (int) ($r['Data_length'] ?? 0) + (int) ($r['Index_length'] ?? 0);
+        if (isset($mine[(string) ($r['Name'] ?? '')])) {
+            $size += (int) ($r['Data_length'] ?? 0) + (int) ($r['Index_length'] ?? 0);
+        }
     }
     return $size;
 }
@@ -552,11 +605,14 @@ function klicenka_udrzba_db_export_step($path, &$c, $deadline = null)
 {
     global $wpdb;
     if (empty($c['tables'])) {
-        $tables = klicenka_udrzba_tables();
-        if (!$tables) {
+        $o = klicenka_udrzba_db_objects();
+        if (!$o['tables']) {
             return klicenka_udrzba_error('db', 'V databázi nejsou žádné tabulky WordPressu.');
         }
-        $c = array('tables' => $tables, 't' => 0, 'begun' => false, 'pk' => null, 'pkIndex' => null, 'last' => null, 'offset' => 0, 'rows' => 0, 'started' => false);
+        $c = array(
+            'tables' => $o['tables'], 'views' => $o['views'], 'other' => $o['other'], 'perTable' => array(), 'viewsDone' => false,
+            't' => 0, 'begun' => false, 'pk' => null, 'pkIndex' => null, 'last' => null, 'offset' => 0, 'rows' => 0, 'started' => false,
+        );
     }
     $gz = @gzopen($path, $c['started'] ? 'ab6' : 'wb6');
     if (!$gz) {
@@ -640,6 +696,7 @@ function klicenka_udrzba_db_export_step($path, &$c, $deadline = null)
                 $chunk .= ($chunk === '' ? 'INSERT INTO ' . $q . ' VALUES ' : ',') . $vals;
                 $c['rows']++;
             }
+            $c['perTable'][$t] = (int) ($c['perTable'][$t] ?? 0) + count($rows);
             if ($chunk !== '' && !$w($chunk . ";\n")) {
                 gzclose($gz);
                 return klicenka_udrzba_error('write', 'Zápis zálohy databáze selhal (místo na disku?).');
@@ -656,6 +713,19 @@ function klicenka_udrzba_db_export_step($path, &$c, $deadline = null)
         }
         $c['t']++;
         $c['begun'] = false;
+    }
+    // Pohledy až po všech tabulkách (odkazují na ně), bez DEFINER (na jiném hostingu by uživatel neexistoval).
+    if (empty($c['viewsDone'])) {
+        foreach ((array) ($c['views'] ?? array()) as $v) {
+            $create = $wpdb->get_row('SHOW CREATE VIEW ' . klicenka_udrzba_ident($v), ARRAY_N);
+            if (!is_array($create) || empty($create[1])) {
+                gzclose($gz);
+                return klicenka_udrzba_error('db', 'Nejde přečíst pohled ' . $v . '.');
+            }
+            $sql = preg_replace('/\sDEFINER=`[^`]*`@`[^`]*`/', '', str_replace(array("\r\n", "\r", "\n"), ' ', (string) $create[1]));
+            $w('DROP VIEW IF EXISTS ' . klicenka_udrzba_ident($v) . ";\n" . $sql . ";\n");
+        }
+        $c['viewsDone'] = true;
     }
     $w("-- konec zálohy\n");
     if (!gzclose($gz)) {
@@ -684,8 +754,8 @@ function klicenka_udrzba_db_verify($path)
     return substr($tail, -strlen("-- konec zálohy\n")) === "-- konec zálohy\n";
 }
 
-/** Co se zálohuje ze souborů: klíč v zipu => složka na disku. */
-function klicenka_udrzba_file_roots($uploads)
+/** Co obnova z trackeru vrací na místo: klíč v zipu => složka na disku. */
+function klicenka_udrzba_restore_roots($uploads)
 {
     $roots = array('plugins' => WP_PLUGIN_DIR, 'themes' => get_theme_root());
     if ($uploads) {
@@ -695,6 +765,47 @@ function klicenka_udrzba_file_roots($uploads)
         }
     }
     return $roots;
+}
+
+/** Kde je wp-config.php: v kořeni webu, nebo (WordPress to dovoluje) o složku výš. null = nenalezen. */
+function klicenka_udrzba_wp_config()
+{
+    $root = rtrim(ABSPATH, '/\\');
+    if (@is_file($root . '/wp-config.php')) {
+        return $root . '/wp-config.php';
+    }
+    $up = dirname($root);
+    return @is_file($up . '/wp-config.php') && !@is_file($up . '/wp-settings.php') ? $up . '/wp-config.php' : null;
+}
+
+/**
+ * Co se zálohuje ze souborů: klíč v zipu => složka na disku. Kromě toho, co obnova vrací (plugins,
+ * themes, uploads), i všechno ostatní, co web potřebuje k obnově od nuly na novém hostingu:
+ *   wp-content/  — zbytek wp-content (mu-plugins, languages, fonts, drop-iny, vlastní složky pluginů),
+ *   koren/       — kořen webu kromě jádra WordPressu (wp-config.php, .htaccess, .user.ini, robots.txt, ověřovací
+ *                  soubory, další složky webu),
+ *   nad-korenem/ — jen wp-config.php, když leží o složku výš.
+ * Co je v jiném kořeni (plugins v wp-content apod.), se nezálohuje dvakrát (viz list_files).
+ */
+function klicenka_udrzba_file_roots($uploads)
+{
+    $roots = klicenka_udrzba_restore_roots($uploads);
+    $roots['wp-content'] = WP_CONTENT_DIR;
+    $roots['koren'] = rtrim(ABSPATH, '/\\');
+    $cfg = klicenka_udrzba_wp_config();
+    if ($cfg && dirname($cfg) !== $roots['koren']) {
+        $roots['nad-korenem'] = dirname($cfg);
+    }
+    return $roots;
+}
+
+/**
+ * Složky přímo ve wp-content a v kořeni webu, které se nezálohují: mezipaměti, dočasné složky aktualizací
+ * a zálohy jiných pluginů. Upravit jde filtrem klicenka_udrzba_vynechat_ostatni (regulární výraz).
+ */
+function klicenka_udrzba_other_skip()
+{
+    return (string) apply_filters('klicenka_udrzba_vynechat_ostatni', '/^(cache|upgrade|upgrade-temp-backup|updraft|ai1wm-backups|wpvivid.*|backups-dup-.*|backup-guard|backwpup-.*|wp-staging.*|et-cache|litespeed|w3tc-cache)$/i');
 }
 
 /**
@@ -719,18 +830,33 @@ function klicenka_udrzba_list_files($list_path, $uploads)
     }
     $skip = realpath(klicenka_udrzba_base());
     $skip_uploads = klicenka_udrzba_uploads_skip();
+    $skip_other = klicenka_udrzba_other_skip();
+    $roots = klicenka_udrzba_file_roots($uploads);
+    // Složky, které má na starosti jiný kořen (nebo se úmyslně nezálohují): uploads vždy, i když jsou média
+    // vypnutá — ta se pak nezálohují vůbec, ne přes wp-content.
+    $owned = array();
+    $u = wp_upload_dir(null, false);
+    foreach (array(WP_PLUGIN_DIR, get_theme_root(), $u['basedir'] ?? '', WP_CONTENT_DIR) as $d) {
+        $rp = $d ? realpath($d) : false;
+        if ($rp) {
+            $owned[$rp] = true;
+        }
+    }
+    $cfg = klicenka_udrzba_wp_config();
     $files = 0;
     $bytes = 0;
-    foreach (klicenka_udrzba_file_roots($uploads) as $key => $dir) {
+    $unreadable = 0;
+    foreach ($roots as $key => $dir) {
         if (!is_dir($dir)) {
             continue;
         }
         fwrite($h, 'd ' . rawurlencode($key) . "\n");
         $base = rtrim($dir, '/');
         $len = strlen($base) + 1;
+        $base_real = realpath($base);
         $filter = new RecursiveCallbackFilterIterator(
             new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
-            function ($f) use ($skip, $key, $base, $skip_uploads) {
+            function ($f) use ($skip, $key, $base, $base_real, $skip_uploads, $skip_other, $owned, $cfg) {
                 if ($f->isLink()) {
                     return false;
                 }
@@ -740,6 +866,28 @@ function klicenka_udrzba_list_files($list_path, $uploads)
                 }
                 if ($key === 'uploads' && $f->isDir() && dirname($p) === $base && preg_match($skip_uploads, $f->getFilename())) {
                     return false;
+                }
+                if ($key === 'nad-korenem') {
+                    return $f->isFile() && $cfg && $p === $cfg;
+                }
+                if ($key === 'wp-content' || $key === 'koren') {
+                    if ($f->isDir()) {
+                        $rp = realpath($p);
+                        if ($rp && $rp !== $base_real && isset($owned[$rp])) {
+                            return false; // plugins, themes, uploads, wp-content: svůj kořen
+                        }
+                        if (dirname($p) === $base && preg_match($skip_other, $f->getFilename())) {
+                            return false;
+                        }
+                        if ($key === 'koren') {
+                            if (dirname($p) === $base && preg_match('/^(wp-admin|wp-includes)$/', $f->getFilename())) {
+                                return false; // jádro WordPressu: při obnově se nainstaluje stejná verze (manifest)
+                            }
+                            if (@is_file($p . '/wp-config.php')) {
+                                return false; // jiná instalace WordPressu v podsložce — zálohuje se sama
+                            }
+                        }
+                    }
                 }
                 return true;
             }
@@ -755,6 +903,9 @@ function klicenka_udrzba_list_files($list_path, $uploads)
                 $files++;
                 $bytes += $size;
             } else {
+                if ($f->isFile()) {
+                    $unreadable++;
+                }
                 continue;
             }
             if (fwrite($h, $line) === false) {
@@ -766,7 +917,7 @@ function klicenka_udrzba_list_files($list_path, $uploads)
     if (!fclose($h)) {
         return klicenka_udrzba_error('write', 'Seznam souborů zálohy nejde zapsat.');
     }
-    return array('files' => $files, 'bytes' => $bytes);
+    return array('files' => $files, 'bytes' => $bytes, 'unreadable' => $unreadable);
 }
 
 /** Přípony, které už jsou zkomprimované: do zipu se jen uloží (rychlé, žádné zbytečné CPU). */
@@ -1082,8 +1233,16 @@ function klicenka_udrzba_job_run($root, &$job, $deadline = null)
                 'complete'  => true,
                 'uploads'   => !empty($job['uploads']),
                 'wordpress' => (string) $wp_version,
-                'db'        => array('tables' => count($job['db']['tables']), 'rows' => (int) $job['db']['rows']),
-                'filesInfo' => array('files' => (int) $job['files'], 'bytes' => (int) $job['bytes'], 'skipped' => (int) $job['skipped']),
+                'db'        => array(
+                    'tables' => count($job['db']['tables']), 'rows' => (int) $job['db']['rows'], 'views' => count((array) ($job['db']['views'] ?? array())),
+                    'perTable' => (object) ($job['db']['perTable'] ?? array()), 'otherInstalls' => array_values((array) ($job['db']['other'] ?? array())),
+                ),
+                'filesInfo' => array(
+                    'files' => (int) $job['files'], 'bytes' => (int) $job['bytes'], 'skipped' => (int) $job['skipped'],
+                    'unreadable' => (int) ($job['total']['unreadable'] ?? 0),
+                ),
+                'roots'     => array_keys(klicenka_udrzba_file_roots(!empty($job['uploads']))),
+                'wpConfig'  => klicenka_udrzba_wp_config() !== null,
                 'files'     => $parts,
                 'size'      => array_sum(wp_list_pluck($parts, 'size')),
                 'sha256'    => hash('sha256', implode('', wp_list_pluck($parts, 'sha256'))),
@@ -1635,27 +1794,37 @@ function klicenka_udrzba_files_restore($root, $m)
         return klicenka_udrzba_error('restore', 'Záloha nemá žádné soubory.');
     }
     // Všechny části nejdřív zkontrolovat, pak rozbalit vedle (část po části do stejné složky).
+    $entries = array();
     foreach ($parts as $part) {
         $zip = new ZipArchive();
         if ($zip->open($root . '/' . $m['id'] . '/' . $part) !== true) {
             return klicenka_udrzba_error('restore', 'Zálohu souborů nejde otevřít (' . $part . ').');
         }
+        $take = array();
         for ($i = 0; $i < $zip->numFiles; $i++) {
             $name = (string) $zip->getNameIndex($i);
-            if (strpos($name, '..') !== false || $name === '' || $name[0] === '/' || !preg_match('#^(plugins|themes|uploads)(/|$)#', $name)) {
+            if (strpos($name, '..') !== false || $name === '' || $name[0] === '/' || !preg_match('#^(plugins|themes|uploads|wp-content|koren|nad-korenem)(/|$)#', $name)) {
                 $zip->close();
                 return klicenka_udrzba_error('restore', 'Záloha souborů obsahuje nepovolenou cestu.');
             }
+            // wp-content/, koren/ a nad-korenem/ jsou jen pro obnovu od nuly (ručně); obnova tady je nevrací.
+            if (preg_match('#^(plugins|themes|uploads)(/|$)#', $name)) {
+                $take[] = $name;
+            }
         }
         $zip->close();
+        $entries[$part] = $take;
     }
     if (!@mkdir($tmp, 0755, true)) {
         return klicenka_udrzba_error('restore', 'Zálohu souborů nejde rozbalit (místo na disku?).');
     }
     foreach ($parts as $part) {
+        if (empty($entries[$part])) {
+            continue;
+        }
         $zip = new ZipArchive();
         $opened = $zip->open($root . '/' . $m['id'] . '/' . $part) === true;
-        $extracted = $opened && $zip->extractTo($tmp);
+        $extracted = $opened && $zip->extractTo($tmp, $entries[$part]);
         if ($opened) {
             $zip->close();
         }
@@ -1671,7 +1840,7 @@ function klicenka_udrzba_files_restore($root, $m)
     }
     $done = array();
     $error = null;
-    foreach (klicenka_udrzba_file_roots(!empty($m['uploads'])) as $key => $dir) {
+    foreach (klicenka_udrzba_restore_roots(!empty($m['uploads'])) as $key => $dir) {
         if (!is_dir($tmp . '/' . $key)) {
             continue;
         }

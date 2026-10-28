@@ -59,6 +59,8 @@ const put = (rel, buf) => { const p = path.join(uploads, rel); fs.mkdirSync(path
 for (let i = 0; i < 600; i++) put(`2024/01/foto-${String(i).padStart(3, "0")}.jpg`, crypto.randomBytes(2048 + (i % 7) * 1024));
 for (let i = 0; i < 6; i++) put(`2024/03/velka-${i}.jpg`, crypto.randomBytes(700 * 1024));
 for (let i = 0; i < 300; i++) put(`2025/06/text ${i} á.txt`, Buffer.from(`Příliš žluťoučký kůň ${i}\n`.repeat(40)));
+// Dost práce na to, aby první krok s rozpočtem 1 s nikdy nestihl celou zálohu (0.3.0 balí i kořen webu a wp-content).
+for (let i = 0; i < 1500; i++) put(`2024/05/maly-${i}.txt`, Buffer.from(`soubor ${i}\n`));
 fs.mkdirSync(path.join(uploads, "2024/02/prazdna"), { recursive: true });
 fs.mkdirSync(path.join(uploads, "cache"), { recursive: true });
 fs.writeFileSync(path.join(uploads, "cache/x.txt"), "cache");
@@ -90,6 +92,15 @@ const steps = [
   { step: "mkdir", path: "/wordpress/wp-content/themes/kut-theme" },
   { step: "writeFile", path: "/wordpress/wp-content/themes/kut-theme/style.css", data: themeCss("1.0.0") },
   { step: "writeFile", path: "/wordpress/wp-content/themes/kut-theme/index.php", data: "<?php // v1.0\n" },
+  // Co obnova od nuly potřebuje mimo plugins/themes/uploads: soubory v kořeni webu, vlastní složka ve wp-content
+  // a tabulka bez prefixu WordPressu (některé pluginy prefix nepoužívají).
+  { step: "writeFile", path: "/wordpress/.htaccess", data: "# kut-htaccess\n" },
+  { step: "writeFile", path: "/wordpress/overeni-google.html", data: "google-site-verification" },
+  { step: "mkdir", path: "/wordpress/wp-content/languages" },
+  { step: "writeFile", path: "/wordpress/wp-content/languages/kut-cs_CZ.mo", data: "mo" },
+  { step: "mkdir", path: "/wordpress/wp-content/cache" },
+  { step: "writeFile", path: "/wordpress/wp-content/cache/x.html", data: "cache" },
+  { step: "runPHP", code: "<?php require '/wordpress/wp-load.php'; global $wpdb; $wpdb->query('CREATE TABLE kut_vlastni (id INTEGER PRIMARY KEY, x TEXT)'); $wpdb->query(\"INSERT INTO kut_vlastni (id, x) VALUES (1, 'bez prefixu')\");" },
 ];
 fs.writeFileSync(path.join(tmp, "blueprint.json"), JSON.stringify({ steps, features: { networking: true } }));
 const wpLog = fs.openSync(path.join(tmp, "playground.log"), "a");
@@ -281,6 +292,16 @@ try {
   const sample = ["2024/03/velka-3.jpg", "2025/06/text 7 á.txt", "2024/01/foto-599.jpg"];
   check("obsah souborů v zipu sedí s originálem", sample.every((rel) => inZip.has(`uploads/${rel}`) && hashOf(inZip.get(`uploads/${rel}`).data()) === hashOf(media[rel])));
   check("fotky se jen ukládají (stored), text se komprimuje (deflate)", inZip.get("uploads/2024/03/velka-3.jpg")?.method === 0 && inZip.get("uploads/2025/06/text 7 á.txt")?.method === 8, [inZip.get("uploads/2024/03/velka-3.jpg")?.method, inZip.get("uploads/2025/06/text 7 á.txt")?.method]);
+
+  // 0.3.0: i to, co je potřeba k obnově od nuly na novém hostingu (obnova z trackeru to nevrací).
+  const names = [...inZip.keys()];
+  check("wp-config.php, .htaccess a ostatní soubory kořene webu (koren/)", inZip.has("koren/wp-config.php") && inZip.has("koren/.htaccess") && inZip.has("koren/overeni-google.html"), names.filter((n) => n.startsWith("koren/")).slice(0, 20));
+  check("jádro WordPressu ne (instaluje se znovu)", !names.some((n) => n.startsWith("koren/wp-includes/") || n.startsWith("koren/wp-admin/")));
+  check("mu-plugins a jazyky (wp-content/)", inZip.has("wp-content/mu-plugins/klicenka-udrzba.php") && inZip.has("wp-content/languages/kut-cs_CZ.mo"), names.filter((n) => n.startsWith("wp-content/")).slice(0, 20));
+  check("nic dvakrát a bez mezipaměti a záloh (plugins/themes/uploads/klicenka-zalohy/cache ve wp-content/ ani koren/)", !names.some((n) => /^(wp-content|koren)\/(.*\/)?(plugins|themes|uploads|klicenka-zalohy|cache)\//.test(n) || n.startsWith("koren/wp-content/")), names.filter((n) => /^(wp-content|koren)\/(.*\/)?(plugins|themes|uploads|klicenka-zalohy|cache)\//.test(n)).slice(0, 10));
+  check("tabulka bez prefixu je v záloze databáze", /INSERT INTO `kut_vlastni`/.test(sqlC), sqlC.match(/CREATE TABLE[^(]*/g)?.slice(0, 30));
+  const manC = JSON.parse(fs.readFileSync(path.join(cdir, "manifest.json"), "utf8"));
+  check("manifest: kořeny, wp-config, řádky po tabulkách", manC.roots?.includes("koren") && manC.roots?.includes("wp-content") && manC.wpConfig === true && manC.db?.perTable?.kut_vlastni === 1 && manC.filesInfo?.unreadable === 0, { roots: manC.roots, wpConfig: manC.wpConfig, db: manC.db?.perTable && Object.keys(manC.db.perTable).length });
 
   console.log("Stažení zálohy");
   const big = zipParts.reduce((a, b) => (b.size > a.size ? b : a), zipParts[0]);
