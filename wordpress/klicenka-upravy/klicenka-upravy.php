@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.4.0
+ * Version: 0.5.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -25,7 +25,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.4.0');
+define('KLICENKA_UPRAVY_VERSION', '0.5.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -1206,6 +1206,33 @@ function klicenka_upravy_rest_publish(WP_REST_Request $request)
     return rest_ensure_response(array('published' => $orig->ID, 'link' => get_permalink($orig->ID), 'draft_trashed' => $draft->ID, 'backups' => min(count($backups), KLICENKA_UPRAVY_BACKUPS), 'elementor_css' => $css));
 }
 
+/**
+ * Zahodit koncept („Převezmu sám“ v trackeru): web jako by úpravu nikdy nikdo nezadal.
+ * Koncept jde do koše (30 dní jde obnovit), soubory nahrané jen k němu se smažou — na živém webu
+ * nikde nejsou, dokud koncept nebyl zveřejněn. Originálu se nic nedotkne. Token publish (jen člověk).
+ */
+function klicenka_upravy_rest_discard(WP_REST_Request $request)
+{
+    $draft = klicenka_upravy_draft($request['id']);
+    if (is_wp_error($draft)) {
+        return $draft;
+    }
+    $p = klicenka_upravy_payload();
+    $media = array();
+    $user = get_user_by('login', KLICENKA_UPRAVY_USER);
+    foreach (get_children(array('post_parent' => $draft->ID, 'post_type' => 'attachment', 'fields' => 'ids')) as $att) {
+        if ($user && (int) get_post_field('post_author', $att) === (int) $user->ID && wp_delete_attachment($att, true)) {
+            $media[] = (int) $att;
+        }
+    }
+    if (get_post_meta($draft->ID, '_elementor_template_type', true) === 'kit') {
+        update_post_meta($draft->ID, '_elementor_template_type', 'section');
+    }
+    wp_trash_post($draft->ID);
+    klicenka_upravy_log('discard', $p, array('draft' => $draft->ID, 'media' => $media));
+    return rest_ensure_response(array('draft_trashed' => $draft->ID, 'media_deleted' => $media));
+}
+
 function klicenka_upravy_rest_rollback(WP_REST_Request $request)
 {
     $orig = klicenka_upravy_original($request['id']);
@@ -1265,6 +1292,7 @@ add_action('rest_api_init', function () {
     register_rest_route(KLICENKA_UPRAVY_NS, "/drafts/$id/media", array('methods' => 'POST', 'callback' => 'klicenka_upravy_rest_media', 'permission_callback' => $auth('drafts')));
     register_rest_route(KLICENKA_UPRAVY_NS, "/drafts/$id/preview-link", array('methods' => 'GET', 'callback' => 'klicenka_upravy_rest_preview', 'permission_callback' => $auth('drafts')));
     register_rest_route(KLICENKA_UPRAVY_NS, "/drafts/$id/publish", array('methods' => 'POST', 'callback' => 'klicenka_upravy_rest_publish', 'permission_callback' => $auth('publish')));
+    register_rest_route(KLICENKA_UPRAVY_NS, "/drafts/$id/discard", array('methods' => 'POST', 'callback' => 'klicenka_upravy_rest_discard', 'permission_callback' => $auth('publish')));
     register_rest_route(KLICENKA_UPRAVY_NS, "/pages/$id/rollback", array('methods' => 'POST', 'callback' => 'klicenka_upravy_rest_rollback', 'permission_callback' => $auth('publish')));
 });
 
