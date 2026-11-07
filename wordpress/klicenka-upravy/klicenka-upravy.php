@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.9.2
+ * Version: 0.9.3
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.9.2');
+define('KLICENKA_UPRAVY_VERSION', '0.9.3');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -724,13 +724,37 @@ function klicenka_upravy_swap_template($draft, $orig)
 {
     // Elementor Pro vybírá šablony pro hlavičku, patičku, pop-upy… podle podmínek; tady jen vymění originál za koncept.
     // Až po Polylangu/WPML (ty tu šablonu přeloží do jazyka stránky), pak teprve výměna za koncept.
-    add_filter('elementor/theme/get_location_templates/template_id', function ($id) use ($draft, $orig) {
-        return (int) $id === $orig ? $draft : $id;
-    }, 999);
+    // Hlavička a patička je na stránce jedna: koncept ji nahradí, i když vznikl z jiné šablony, než kterou stránka používá.
+    $type = (string) get_post_meta($draft, '_elementor_template_type', true);
+    $single = in_array($type, array('header', 'footer'), true) ? $type : null;
+    add_filter('elementor/theme/get_location_templates/template_id', function ($id, $location = '') use ($draft, $orig, $single) {
+        return (int) $id === $orig || ($single && $location === $single) ? $draft : $id;
+    }, 999, 2);
     // Elementor kontroluje stav: koncept se v tomto požadavku tváří jako zveřejněný (jen filtr, nic se neukládá).
     add_filter('get_post_status', function ($status, $post) use ($draft) {
         return (int) $post->ID === $draft ? 'publish' : $status;
     }, 10, 2);
+}
+
+/** Pop-up, který otevírá odkaz, Elementor vytiskne jen zveřejněný; koncepty úpravy se v tomto požadavku tak tváří (nic se neukládá). */
+function klicenka_upravy_preview_popups($req)
+{
+    $popups = array_map('intval', get_posts(array(
+        'post_type'   => 'elementor_library',
+        'post_status' => 'draft',
+        'numberposts' => 50,
+        'fields'      => 'ids',
+        'lang'        => '',
+        'meta_query'  => array(
+            array('key' => '_klicenka_upravy_req', 'value' => (string) $req),
+            array('key' => '_elementor_template_type', 'value' => 'popup'),
+        ),
+    )));
+    if ($popups) {
+        add_filter('get_post_status', function ($status, $post) use ($popups) {
+            return in_array((int) $post->ID, $popups, true) ? 'publish' : $status;
+        }, 10, 2);
+    }
 }
 
 /** U šablony Elementoru: typ (header, footer, popup, section, kit…), podmínky zobrazení a jestli je aktivní kit. */
@@ -1649,21 +1673,12 @@ add_action('init', function () {
         'meta_key'    => '_klicenka_upravy_req',
         'meta_value'  => (string) get_post_meta($page, '_klicenka_upravy_req', true),
     ));
-    $popups = array();
     foreach ($templates as $t) {
-        if (get_post_meta($t, '_elementor_template_type', true) === 'popup') {
-            $popups[] = (int) $t;
-        }
         if (array_intersect($ids, klicenka_upravy_condition_targets(klicenka_upravy_pending_conditions($t)))) {
             klicenka_upravy_swap_template((int) $t, klicenka_upravy_template_base((int) $t));
         }
     }
-    // Pop-up, který otevírá odkaz, Elementor vytiskne jen zveřejněný; v tomto požadavku se koncept tak tváří (nic se neukládá).
-    if ($popups) {
-        add_filter('get_post_status', function ($status, $post) use ($popups) {
-            return in_array((int) $post->ID, $popups, true) ? 'publish' : $status;
-        }, 10, 2);
-    }
+    klicenka_upravy_preview_popups(get_post_meta($page, '_klicenka_upravy_req', true));
 });
 
 /** Klíč pro porovnání odkazů: bez kotvy, schématu a koncového lomítka. */
@@ -1757,6 +1772,7 @@ add_action('init', function () {
     }
     list($draft, $orig) = $t;
     klicenka_upravy_swap_template($draft, $orig);
+    klicenka_upravy_preview_popups(get_post_meta($draft, '_klicenka_upravy_req', true));
     // Kit (globální barvy, písma): Elementor bere jen zveřejněný kit, proto se CSS konceptu přidá navrch.
     // Jeho pravidla platí pro třídu elementor-kit-<koncept>, kterou dostane body, a načtou se až po originálu.
     if ((int) get_option('elementor_active_kit') === $orig) {

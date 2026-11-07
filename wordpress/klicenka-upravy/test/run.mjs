@@ -460,6 +460,16 @@ try {
     check("živá stránka vytiskne pop-up z odkazu", live.includes("English popup"), live.slice(-800));
     check("nová stránka má vlastní patičku", live.includes("English footer") && !shows(live, FOOT3), live.slice(-1500));
     check("ostatní stránky mají společnou", shows(await html(`page_id=${PAGE}`), FOOT3) && !(await html(`page_id=${OTHER}`)).includes("English footer"));
+    // Kopie kopie míří na stránku se společnou patičkou: náhled ji musí ukázat, i když na té stránce není její základ.
+    const t2 = await call("POST", "/pages/new", { token: TN(), body: { title: "Patička 2", from: NF } });
+    const NF2 = t2.json?.id;
+    const pop2 = (await call("POST", "/pages/new", { token: TN(), body: { title: "Popup 2", from: NPOP } })).json?.id;
+    await call("PATCH", `/drafts/${pop2}/elements`, { token: TN(pop2), body: [{ id: "ptext", settings: { editor: "<p>Second popup</p>" } }] });
+    await call("PATCH", `/drafts/${NF2}/elements`, { token: TN(NF2), body: [{ id: "@conditions", settings: { conditions: [`include/singular/page/${PAGE}`] } }, { id: "ftext", settings: { editor: "<p>Second footer</p>" } }, { id: "fbtn", settings: { __dynamic__: { link: `[elementor-tag id="68842e0" name="popup" settings="%7B%22popup%22%3A%22${pop2}%22%7D"]` } } }] });
+    const pv2 = await call("GET", `/drafts/${NF2}/preview-link`, { token: TN(NF2) });
+    const h2 = await (await fetch(pv2.json.url)).text();
+    check("náhled kopie kopie ukáže koncept i jeho pop-up", h2.includes("Second footer") && h2.includes("Second popup") && !shows(h2, FOOT3), pv2.json?.url);
+    for (const id of [NF2, pop2]) await call("POST", `/drafts/${id}/discard`, { token: PUB(id) });
     const rb = await call("POST", `/pages/${NF}/rollback`, { token: PUB(NF) });
     check("návrat šablony: podmínky pryč, koncept je drží", rb.status === 200 && (await opt()) === before && (await helper(`/inspect&post=${NF}`)).post.status === "draft", [rb.json, await opt()]);
     check("po návratu zas společná patička", shows(await html(`page_id=${NP}`), FOOT3));
