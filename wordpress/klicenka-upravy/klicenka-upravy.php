@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.9.0
+ * Version: 0.9.1
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.9.0');
+define('KLICENKA_UPRAVY_VERSION', '0.9.1');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -1611,10 +1611,15 @@ add_filter('posts_results', function ($posts, $q) {
         $posts[0]->post_status = 'publish';
         add_filter('redirect_canonical', '__return_false');
         add_filter('wp_robots', 'wp_robots_no_robots');
+        // LiteSpeed by jinak náhled uložil na týden a ukazoval starý stav konceptu.
+        if (!defined('DONOTCACHEPAGE')) {
+            define('DONOTCACHEPAGE', true);
+        }
         add_action('send_headers', function () {
             nocache_headers();
             header('X-Robots-Tag: noindex, nofollow');
             header('Referrer-Policy: no-referrer');
+            header('X-LiteSpeed-Cache-Control: no-cache');
         });
     }
     return $posts;

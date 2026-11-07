@@ -516,7 +516,9 @@ try {
       await call("PATCH", `/drafts/${LA}/elements`, { token: TL(LA), body: [{ id: "@post", settings: { content: `<p><a href="${WP}/odkazy-b/#kotva">nova</a> <a href="/odkazy-b">relativni</a> <a href="${WP}${cizi}">kopie</a> <a href="${WP}/?p=${CIZI}">podle-id</a> <a href="${WP}/jina-stranka/">jina</a></p>` } }] });
       await call("PATCH", `/drafts/${LB}/elements`, { token: TL(LB), body: [{ id: "@post", settings: { content: "<p>Obsah stránky B</p>" } }] });
       const pl = await call("GET", `/drafts/${LA}/preview-link`, { token: TL(LA) });
-      const h = await (await fetch(pl.json.url)).text();
+      const plRes = await fetch(pl.json.url);
+      const h = await plRes.text();
+      check("náhled stránky se necachuje", plRes.headers.get("x-litespeed-cache-control") === "no-cache", plRes.headers.get("x-litespeed-cache-control"));
       const hrefOf = (t) => new RegExp(`<a[^>]*href="([^"]*)"[^>]*>${t}<`).exec(h)?.[1]?.replace(/&#0?38;|&amp;/g, "&");
       const nova = hrefOf("nova");
       check("odkaz na novou stránku vede na její náhled i s kotvou", nova?.includes(`page_id=${LB}`) && nova.includes("klicenka_nahled=") && nova.endsWith("#kotva"), nova);
