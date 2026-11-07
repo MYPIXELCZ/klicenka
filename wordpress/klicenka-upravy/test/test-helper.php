@@ -64,6 +64,13 @@ add_action('init', function () {
     ))));
 });
 
+// Český web jako v praxi (Playground má jinak angličtinu a překlad do jazyka webu plugin odmítne).
+if (defined('KUT_NO_LANGS')) {
+    add_filter('locale', function () {
+        return 'cs_CZ';
+    }, 1);
+}
+
 // Co v praxi dělá Connect Polylang for Elementor: šablony jsou překládané.
 add_filter('pll_get_post_types', function ($types) {
     $types['elementor_library'] = 'elementor_library';
@@ -72,7 +79,7 @@ add_filter('pll_get_post_types', function ($types) {
 
 // Polylang (jen když běží): čeština a němčina, německá kopie stránky Test Elementor propojená jako překlad.
 add_action('init', function () {
-    if (!function_exists('pll_set_post_language') || get_option('kut_pll') || !get_option('kut_fixtures')) {
+    if (!function_exists('pll_set_post_language') || get_option('kut_pll') || !get_option('kut_fixtures') || defined('KUT_NO_LANGS')) {
         return;
     }
     update_option('kut_pll', 1);
@@ -96,6 +103,29 @@ add_action('init', function () {
     pll_set_post_language($de, 'de');
     pll_save_post_translations(array('cs' => $cs->ID, 'de' => $de));
 }, 20);
+
+// Pozice menu motivu, kterou Polylang bez nastavení vynuluje.
+add_action('after_setup_theme', function () {
+    register_nav_menus(array('kut-hlavni' => 'Hlavní'));
+});
+add_action('init', function () {
+    if (get_option('kut_menu')) {
+        return;
+    }
+    update_option('kut_menu', 1);
+    $id = wp_create_nav_menu('Hlavní menu');
+    if (!is_wp_error($id)) {
+        wp_update_nav_menu_item($id, 0, array('menu-item-title' => 'Domů', 'menu-item-url' => home_url('/'), 'menu-item-status' => 'publish'));
+        set_theme_mod('nav_menu_locations', array('kut-hlavni' => $id));
+    }
+}, 30);
+// Stránka s tím, co návštěvník v pozici menu opravdu dostane.
+add_action('template_redirect', function () {
+    if (isset($_GET['kut_menu'])) {
+        wp_nav_menu(array('theme_location' => 'kut-hlavni', 'fallback_cb' => false));
+        exit;
+    }
+});
 
 add_action('rest_api_init', function () {
     register_rest_route('kut/v1', '/inspect', array('methods' => 'GET', 'permission_callback' => '__return_true', 'callback' => function ($r) {

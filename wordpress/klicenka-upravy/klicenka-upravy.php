@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.6.0
+ * Version: 0.7.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -17,7 +17,8 @@
  * koncept šablony se proto na webu nikdy neuplatní; náhled ho na stránce vymění jen pro požadavek s podepsaným odkazem.
  *
  * Nová stránka (POST /pages/new): koncept prázdný nebo jako kopie existující; zveřejnění zveřejní koncept, nic nepřepíše,
- * s Polylangem ho propojí jako překlad; návrat ho stáhne do konceptu. Polylang plugin neinstaluje, jen ho použije.
+ * s Polylangem ho propojí jako překlad; návrat ho stáhne do konceptu. Polylang instaluje člověk; jazyky a přiřazení obsahu
+ * nastaví plugin sám až při zveřejnění a návrat je zase odebere.
  *
  * Token: hlavička typ "klicenka-upravy+jwt", claimy jako u Klíčenky (iss, aud, sub, act, jti, iat, exp)
  * a navíc scope (drafts | publish), req (id požadavku) a post (id originální stránky).
@@ -28,7 +29,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.6.0');
+define('KLICENKA_UPRAVY_VERSION', '0.7.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -719,6 +720,143 @@ function klicenka_upravy_rest_duplicate(WP_REST_Request $request)
     return rest_ensure_response(array('id' => (int) $id, 'created' => true, 'original' => $orig->ID, 'editor' => klicenka_upravy_editor($orig)));
 }
 
+/* ---------- Jazyky Polylangu ---------- */
+
+/** Předdefinované jazyky Polylangu (locale => code, name…). */
+function klicenka_upravy_pll_languages()
+{
+    foreach (array('/src/settings/languages.php', '/settings/languages.php') as $f) {
+        if (defined('POLYLANG_DIR') && file_exists(POLYLANG_DIR . $f)) {
+            return (array) include POLYLANG_DIR . $f;
+        }
+    }
+    return array();
+}
+
+/** Locale pro kód jazyka: cs → cs_CZ, de → de_DE, en → en_GB; jinak první shoda. */
+function klicenka_upravy_locale_for($code)
+{
+    $all = klicenka_upravy_pll_languages();
+    foreach (array($code . '_' . strtoupper($code), $code === 'en' ? 'en_GB' : '', $code === 'cs' ? 'cs_CZ' : '') as $l) {
+        if ($l !== '' && isset($all[$l]) && $all[$l]['code'] === $code) {
+            return $l;
+        }
+    }
+    foreach ($all as $l => $info) {
+        if (($info['code'] ?? '') === $code) {
+            return $l;
+        }
+    }
+    return null;
+}
+
+function klicenka_upravy_pll_add($locale, $order)
+{
+    $all = klicenka_upravy_pll_languages();
+    $i = $all[$locale] ?? null;
+    if (!$i) {
+        return klicenka_upravy_error('no_language', 'Jazyk ' . $locale . ' Polylang nezná.', 422);
+    }
+    $args = array('name' => $i['name'], 'slug' => $i['code'], 'locale' => $locale, 'rtl' => ($i['dir'] ?? '') === 'rtl', 'term_group' => $order, 'flag' => $i['flag'] ?? '');
+    $model = PLL()->model;
+    $res = isset($model->languages) && method_exists($model->languages, 'add') ? $model->languages->add($args) : $model->add_language($args);
+    if (is_wp_error($res) && $res->has_errors()) {
+        return klicenka_upravy_error('failed', 'Jazyk se nepodařilo založit: ' . $res->get_error_message(), 500);
+    }
+    return $i['code'];
+}
+
+/**
+ * Jazyk pro zveřejňovanou stránku. Web bez jazyků se nastaví celý najednou, jinak by se rozbil: výchozí jazyk podle webu
+ * (bez předpony, adresy zůstanou), jazyk všemu stávajícímu obsahu (obsah bez jazyka Polylang neukazuje) a menu v pozicích
+ * motivu (Polylang je jinak vynuluje). Co přidáme, si pamatujeme, ať to jde návratem vzít zpátky.
+ */
+function klicenka_upravy_ensure_language($lang, $req)
+{
+    $list = (array) pll_languages_list();
+    if (in_array($lang, $list, true)) {
+        return true;
+    }
+    $added = array();
+    if (!$list) {
+        $code = substr((string) get_locale(), 0, 2);
+        $slug = klicenka_upravy_pll_add(isset(klicenka_upravy_pll_languages()[get_locale()]) ? get_locale() : (string) klicenka_upravy_locale_for($code), 0);
+        if (is_wp_error($slug)) {
+            return $slug;
+        }
+        $added[] = $slug;
+        PLL()->model->set_language_in_mass();
+        $locations = get_nav_menu_locations();
+        if ($locations) {
+            $theme = get_option('stylesheet');
+            $menus = PLL()->options['nav_menus'];
+            foreach ($locations as $loc => $menu) {
+                $menus[$theme][$loc][$slug] = (int) $menu;
+            }
+            PLL()->options['nav_menus'] = $menus;
+        }
+    }
+    if (!in_array($lang, $added, true)) {
+        $slug = klicenka_upravy_pll_add((string) klicenka_upravy_locale_for($lang), count($list) + count($added));
+        if (is_wp_error($slug)) {
+            return $slug;
+        }
+        $added[] = $slug;
+    }
+    $all = (array) get_option('klicenka_upravy_langs', array());
+    $all[$req] = array_values(array_unique(array_merge((array) ($all[$req] ?? array()), $added)));
+    update_option('klicenka_upravy_langs', $all, false);
+    update_option('klicenka_upravy_flush', 1);
+    klicenka_upravy_purge_all();
+    return true;
+}
+
+/** Návrat: jazyky, které založil tento požadavek a už na nich nic není, zase pryč. Výchozí až jako poslední. */
+function klicenka_upravy_remove_languages($req)
+{
+    $all = (array) get_option('klicenka_upravy_langs', array());
+    $added = (array) ($all[$req] ?? array());
+    if (!$added) {
+        return;
+    }
+    $model = PLL()->model;
+    $delete = function ($slug) use ($model) {
+        $term = get_term_by('slug', $slug, 'language');
+        if ($term) {
+            isset($model->languages) && method_exists($model->languages, 'delete') ? $model->languages->delete($term->term_id) : $model->delete_language($term->term_id);
+        }
+    };
+    $default = pll_default_language();
+    foreach ($added as $k => $slug) {
+        $term = get_term_by('slug', $slug, 'language');
+        if ($slug !== $default && $term && !get_objects_in_term($term->term_id, 'language')) {
+            $delete($slug);
+            unset($added[$k]);
+        }
+    }
+    // Výchozí jazyk založený námi: až když žádný jiný nezbyl, web je pak jako před Polylangem.
+    if (in_array($default, $added, true) && array_values((array) pll_languages_list()) === array($default)) {
+        $delete($default);
+        $added = array_diff($added, array($default));
+    }
+    if ($added) {
+        $all[$req] = array_values($added);
+    } else {
+        unset($all[$req]);
+    }
+    update_option('klicenka_upravy_langs', $all, false);
+    update_option('klicenka_upravy_flush', 1);
+    klicenka_upravy_purge_all();
+}
+
+// Polylang přidává svá přepisovací pravidla až v požadavku, kde jazyky už existují: v tom, kde vznikly, by /en/… nefungovalo.
+add_action('wp_loaded', function () {
+    if (get_option('klicenka_upravy_flush')) {
+        delete_option('klicenka_upravy_flush');
+        flush_rewrite_rules();
+    }
+});
+
 /* ---------- Nová stránka ---------- */
 
 /**
@@ -762,8 +900,14 @@ function klicenka_upravy_rest_new(WP_REST_Request $request)
         if (!function_exists('pll_languages_list') || !function_exists('pll_set_post_language')) {
             return klicenka_upravy_error('no_polylang', 'Jazykové verze potřebují plugin Polylang, na webu není.', 422);
         }
-        if (!in_array($lang, (array) pll_languages_list(), true)) {
-            return klicenka_upravy_error('no_language', 'Jazyk „' . sanitize_text_field($lang) . '“ na webu není nastavený.', 422);
+        // Jazyk, který web ještě nemá, založí až zveřejnění: do té doby se na živém webu nic nemění.
+        $langs = (array) pll_languages_list();
+        if (!in_array($lang, $langs, true) && !klicenka_upravy_locale_for($lang)) {
+            return klicenka_upravy_error('no_language', 'Jazyk „' . sanitize_text_field($lang) . '“ Polylang nezná.', 422);
+        }
+        // Web bez jazyků: výchozí bude jazyk webu, ten nemůže být zároveň překladem.
+        if (!$langs && substr((string) get_locale(), 0, 2) === $lang) {
+            return klicenka_upravy_error('same_language', 'Web už je v tomto jazyce.', 422);
         }
         if ($base && function_exists('pll_get_post') && (int) pll_get_post($base->ID, $lang) > 0 && (int) pll_get_post($base->ID, $lang) !== $base->ID) {
             return klicenka_upravy_error('translation_exists', 'Tato jazyková verze už existuje.', 409);
@@ -812,7 +956,7 @@ function klicenka_upravy_rest_new(WP_REST_Request $request)
     update_post_meta($id, '_klicenka_upravy_source', (string) $id);
     update_post_meta($id, '_klicenka_upravy_req', $p['req']);
     update_post_meta($id, '_klicenka_upravy_new', $key);
-    if ($lang !== '') {
+    if ($lang !== '' && in_array($lang, (array) pll_languages_list(), true)) {
         pll_set_post_language($id, $lang);
     }
     if ($template) {
@@ -834,6 +978,16 @@ function klicenka_upravy_publish_new($draft, $p)
     $base = $from ? get_post($from) : null;
     if ($lang !== '' && $base && function_exists('pll_get_post') && (int) pll_get_post($from, $lang) > 0 && (int) pll_get_post($from, $lang) !== $draft->ID) {
         return klicenka_upravy_error('conflict', 'Tato jazyková verze už mezitím vznikla, nic se nezveřejnilo.', 409);
+    }
+    if ($lang !== '') {
+        if (!function_exists('pll_languages_list')) {
+            return klicenka_upravy_error('no_polylang', 'Polylang na webu není, nic se nezveřejnilo.', 422);
+        }
+        $ready = klicenka_upravy_ensure_language($lang, $p['req']);
+        if (is_wp_error($ready)) {
+            return $ready;
+        }
+        pll_set_post_language($draft->ID, $lang);
     }
     $author = $base ? (int) $base->post_author : 0;
     if (!$author) {
@@ -900,6 +1054,14 @@ function klicenka_upravy_rollback_new($post, $created, $p)
     if ($post->post_type === 'elementor_library') {
         klicenka_upravy_purge_all();
     }
+    if (function_exists('pll_languages_list')) {
+        $langs = (array) (((array) get_option('klicenka_upravy_langs', array()))[$p['req']] ?? array());
+        // Koncept v jazyce, který založilo zveřejnění: jazyk mu znovu nastaví až další zveřejnění.
+        if (in_array((string) pll_get_post_language($post->ID), $langs, true)) {
+            wp_delete_object_term_relationships($post->ID, 'language');
+        }
+        klicenka_upravy_remove_languages($p['req']);
+    }
     clean_post_cache($post->ID);
     klicenka_upravy_log('rollback', $p, array('new' => true));
     return rest_ensure_response(array('restored' => $post->ID, 'new' => true, 'draft' => $post->ID));
@@ -961,6 +1123,36 @@ function klicenka_upravy_rest_outline(WP_REST_Request $request)
     return rest_ensure_response($out);
 }
 
+/** Nová id pro vkládaný prvek a jeho potomky (Elementor potřebuje unikátní). */
+function klicenka_upravy_element_ids($el)
+{
+    $el['id'] = substr(md5(uniqid('', true)), 0, 7);
+    $el['settings'] = isset($el['settings']) && is_array($el['settings']) && $el['settings'] ? $el['settings'] : (object) array();
+    $el['elements'] = array_map('klicenka_upravy_element_ids', isset($el['elements']) && is_array($el['elements']) ? $el['elements'] : array());
+    return $el;
+}
+
+/** Vloží prvek za prvek id (after), před něj (before), na konec do něj (inside), nebo prvek odebere (remove). @return bool nalezen */
+function klicenka_upravy_element_op(&$elements, $id, $op, $new = null)
+{
+    foreach ($elements as $i => &$el) {
+        if ((string) ($el['id'] ?? '') === (string) $id) {
+            if ($op === 'remove') {
+                array_splice($elements, $i, 1);
+            } elseif ($op === 'inside') {
+                $el['elements'][] = $new;
+            } else {
+                array_splice($elements, $op === 'after' ? $i + 1 : $i, 0, array($new));
+            }
+            return true;
+        }
+        if (!empty($el['elements']) && klicenka_upravy_element_op($el['elements'], $id, $op, $new)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function klicenka_upravy_rest_elements(WP_REST_Request $request)
 {
     $draft = klicenka_upravy_draft($request['id']);
@@ -971,6 +1163,44 @@ function klicenka_upravy_rest_elements(WP_REST_Request $request)
     $changes = isset($changes['elements']) ? $changes['elements'] : $changes;
     if (!is_array($changes) || !$changes || count($changes) > 200) {
         return klicenka_upravy_error('invalid', 'Pošlete seznam {id, settings} (1 až 200 položek).', 400);
+    }
+    // Struktura: {"id", "insert": {"position": "after|before|inside", "element": {elType, widgetType, settings}}} a {"id", "remove": true}.
+    // Jen v konceptu Elementoru; živý web se mění až zveřejněním.
+    $ops = array();
+    foreach ($changes as $i => $c) {
+        if (is_array($c) && isset($c['id']) && is_scalar($c['id']) && (isset($c['insert']) || !empty($c['remove']))) {
+            $ops[] = $c;
+            unset($changes[$i]);
+        }
+    }
+    $changes = array_values($changes);
+    if ($ops) {
+        if (klicenka_upravy_editor($draft) !== 'elementor') {
+            return klicenka_upravy_error('invalid', 'Prvky přidávat a mazat jde jen v Elementoru.', 422);
+        }
+        $data = klicenka_upravy_elementor_data($draft->ID);
+        foreach ($ops as $c) {
+            $new = null;
+            $op = 'remove';
+            if (isset($c['insert'])) {
+                $op = (string) ($c['insert']['position'] ?? 'after');
+                $el = klicenka_upravy_clean($c['insert']['element'] ?? null);
+                if (!in_array($op, array('after', 'before', 'inside'), true) || !is_array($el) || !in_array($el['elType'] ?? '', array('widget', 'container', 'section', 'column'), true)) {
+                    return klicenka_upravy_error('invalid', 'Prvek ' . $c['id'] . ': neplatné vložení.', 400);
+                }
+                $new = klicenka_upravy_element_ids($el);
+            }
+            if (!klicenka_upravy_element_op($data, (string) $c['id'], $op, $new)) {
+                return klicenka_upravy_error('unknown_element', 'Prvek neexistuje: ' . $c['id'], 422);
+            }
+        }
+        klicenka_upravy_set_meta_raw($draft->ID, '_elementor_data', wp_json_encode($data));
+        klicenka_upravy_elementor_refresh($draft->ID);
+        clean_post_cache($draft->ID);
+        if (!$changes) {
+            klicenka_upravy_log('elements', klicenka_upravy_payload(), array('draft' => $draft->ID, 'ids' => array_slice(array_column($ops, 'id'), 0, 50)));
+            return rest_ensure_response(array('id' => $draft->ID, 'updated' => array_values(array_unique(array_map('strval', array_column($ops, 'id'))))));
+        }
     }
     $clean = array();
     foreach ($changes as $i => $c) {
@@ -1503,8 +1733,10 @@ function klicenka_upravy_rest_status()
         'klicenka'  => defined('KLICENKA_PLUGIN_VERSION') ? KLICENKA_PLUGIN_VERSION : null,
         'elementor' => defined('ELEMENTOR_VERSION'),
         // Spouštěč podle toho pozná, co web umí: nové stránky a jazyky Polylangu.
-        'features'  => array('new-pages'),
+        'features'  => array('new-pages', 'languages-on-publish', 'insert-elements'),
         'languages' => function_exists('pll_languages_list') ? array_values((array) pll_languages_list()) : null,
+        // Connect Polylang for Elementor: překlad šablon a widget polylang-language-switcher.
+        'connect'   => defined('CPEL_PLUGIN_VERSION'),
     ));
 }
 

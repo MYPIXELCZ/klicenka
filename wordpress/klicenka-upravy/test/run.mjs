@@ -61,11 +61,12 @@ fs.copyFileSync(klicenkaPhp, path.join(mu, "klicenka.php"));
 fs.copyFileSync(path.join(pluginDir, "klicenka-upravy.php"), path.join(mu, "klicenka-upravy.php"));
 fs.copyFileSync(path.join(here, "test-helper.php"), path.join(mu, "zz-test-helper.php"));
 const steps = [
-  { step: "defineWpConfigConsts", consts: { KLICENKA_AUDIENCE: "example-wordpress", KLICENKA_ENVIRONMENT: "local", KLICENKA_ISSUER: ISSUER, KLICENKA_UPRAVY_MAX_UPLOAD: 300000, KLICENKA_UPRAVY_MAX_PDF: 600000 } },
-  { step: "setSiteOptions", options: { permalink_structure: "/%postname%/" } },
+  { step: "defineWpConfigConsts", consts: { KLICENKA_AUDIENCE: "example-wordpress", KLICENKA_ENVIRONMENT: "local", KLICENKA_ISSUER: ISSUER, KLICENKA_UPRAVY_MAX_UPLOAD: 300000, KLICENKA_UPRAVY_MAX_PDF: 600000, ...(process.env.NO_LANGS ? { KUT_NO_LANGS: true } : {}) } },
+  { step: "setSiteOptions", options: { permalink_structure: "/%postname%/", ...(process.env.NO_LANGS ? { WPLANG: "cs_CZ" } : {}) } },
 ];
 if (withElementor) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "elementor" }, options: { activate: true } });
-const withPolylang = !!process.env.WITH_POLYLANG;
+const noLangs = !!process.env.NO_LANGS;
+const withPolylang = !!process.env.WITH_POLYLANG || noLangs;
 if (withPolylang) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "polylang" }, options: { activate: true } });
 fs.writeFileSync(path.join(tmp, "blueprint.json"), JSON.stringify({ steps, features: { networking: true } }, null, 2));
 
@@ -364,7 +365,7 @@ try {
   }
 
   // ---------- Vícejazyčný web (Polylang) ----------
-  if (withPolylang) {
+  if (withPolylang && !noLangs) {
     console.log("\nPolylang");
     await fetch(`${WP}/`); // init založí jazyky a překlad
     const stP = await helper("/state");
@@ -426,11 +427,11 @@ try {
       check("překlad prvku jen v kopii", up.status === 200 && (await helper(`/inspect&post=${NE}`)).meta._elementor_data.includes("English heading") && !(await helper(`/inspect&post=${EL}`)).meta._elementor_data.includes("English heading"), up.json);
       await call("POST", `/drafts/${NE}/discard`, { token: PUB(NE) });
     }
-    if (withPolylang) {
+    if (withPolylang && !noLangs) {
       await fetch(`${WP}/`);
       const stL = await call("GET", "/status");
       check("status: jazyky webu", stL.json?.languages?.includes("de") && stL.json?.features?.includes("new-pages"), stL.json);
-      check("neznámý jazyk 422", (await newPage({ title: "x", from: GB, lang: "fr" })).status === 422);
+      check("neznámý jazyk 422", (await newPage({ title: "x", from: GB, lang: "xx" })).status === 422);
       const stP2 = await helper("/state");
       check("existující překlad 409", (await newPage({ title: "x", from: EL, lang: "de" })).status === 409, stP2.pages["Test Elementor DE"]);
       const tl = await newPage({ title: "Test Gutenberg DE", slug: "test-gutenberg-de", from: GB, lang: "de" });
@@ -460,6 +461,65 @@ try {
       const list2 = (await call("GET", "/pages&type=page", { token: sign({ req: "r9" }) })).json.pages;
       check("návrat odpojí překlad", tr.status === 200 && !list2.find((x) => x.id === GB)?.translations?.de && (await helper(`/inspect&post=${TL}`)).post.status === "draft", list2.find((x) => x.id === GB));
     }
+  }
+
+  // ---------- Polylang právě nainstalovaný, bez jazyků: vše nastaví zveřejnění ----------
+  if (noLangs) {
+    console.log("\nPolylang bez jazyků");
+    const TN = (post) => sign({ req: "r10", ...(post ? { post } : {}) });
+    const PUB = (post) => sign({ scope: "publish", req: "r10", post }, { ttl: 60 });
+    const menu = async () => (await (await fetch(`${WP}/?kut_menu=1`)).text()).includes("Domů");
+    const s0 = await call("GET", "/status");
+    check("web bez jazyků", Array.isArray(s0.json?.languages) && s0.json.languages.length === 0, s0.json);
+    check("menu v pozici motivu před nastavením", await menu());
+    check("překlad do jazyka webu 422", (await call("POST", "/pages/new", { token: TN(), body: { title: "x", from: GB, lang: "cs" } })).status === 422);
+    const a = await call("POST", "/pages/new", { token: TN(), body: { title: "Test Gutenberg EN", slug: "test-gutenberg-en", from: GB, lang: "en" } });
+    const A = a.json?.id;
+    const b = await call("POST", "/pages/new", { token: TN(), body: { title: "Test Elementor EN", slug: "test-elementor-en", from: EL, lang: "en" } });
+    const B = b.json?.id;
+    check("koncepty 200, jazyk zatím web nemá", a.status === 200 && b.status === 200 && (await call("GET", "/status")).json.languages.length === 0, [a.json, b.json]);
+    const pl = await call("GET", `/drafts/${A}/preview-link`, { token: TN(A) });
+    check("náhled konceptu před nastavením jazyků", (await fetch(pl.json.url)).status === 200, pl.json);
+    const homeBefore = await (await fetch(`${WP}/?page_id=${GB}`, { redirect: "follow" })).text();
+    const p1 = await call("POST", `/drafts/${A}/publish`, { token: PUB(A) });
+    const s1 = await call("GET", "/status");
+    check("zveřejnění založí výchozí jazyk a angličtinu", p1.status === 200 && s1.json.languages.includes("en") && s1.json.languages.length === 2, { p: p1.json, s: s1.json });
+    const p2 = await call("POST", `/drafts/${B}/publish`, { token: PUB(B) });
+    check("další stránka stejného jazyka", p2.status === 200 && (await call("GET", "/status")).json.languages.length === 2, p2.json);
+    const l1 = (await call("GET", "/pages&type=page", { token: sign({ req: "r10" }) })).json.pages;
+    const gb = l1.find((x) => x.id === GB), en = l1.find((x) => x.id === A), cizi2 = l1.find((x) => x.id === CIZI);
+    check("stávající obsah má výchozí jazyk, překlad propojený", !!cizi2?.lang && gb?.translations?.en === A && en?.lang === "en", { gb, en, cizi2 });
+    check("menu zůstalo v pozici motivu", await menu());
+    const live = await fetch(`${WP}/test-gutenberg/`, { redirect: "manual" });
+    check("česká adresa beze změny", live.status === 200, live.status);
+    check("anglická stránka žije pod /en/", (await fetch(`${WP}/en/test-gutenberg-en/`)).status === 200);
+    await fetch(`${WP}/`);
+    const r1 = await call("POST", `/pages/${A}/rollback`, { token: PUB(A) });
+    check("návrat první stránky: jazyky zůstávají, druhá je používá", r1.status === 200 && (await call("GET", "/status")).json.languages.length === 2, r1.json);
+    const r2 = await call("POST", `/pages/${B}/rollback`, { token: PUB(B) });
+    const s2 = await call("GET", "/status");
+    check("návrat poslední: web zase bez jazyků", r2.status === 200 && s2.json.languages.length === 0, { r: r2.json, s: s2.json });
+    check("po návratu menu a obsah jako dřív", (await menu()) && (await (await fetch(`${WP}/?page_id=${GB}`, { redirect: "follow" })).text()).length > 0 && homeBefore.length > 0);
+    check("koncept jde zveřejnit znovu", (await call("POST", `/drafts/${A}/publish`, { token: PUB(A) })).status === 200 && (await call("GET", "/status")).json.languages.length === 2);
+    await call("POST", `/pages/${A}/rollback`, { token: PUB(A) });
+  }
+
+  // ---------- Prvky v konceptu ----------
+  if (withElementor) {
+    console.log("\nVkládání prvků");
+    const TI = (c = {}) => sign({ req: "r11", post: EL, ...c });
+    const d = await call("POST", `/pages/${EL}/duplicate`, { token: TI() });
+    const ID = d.json.id;
+    const orig = (await helper(`/inspect&post=${EL}`)).meta._elementor_data;
+    const ins = await call("PATCH", `/drafts/${ID}/elements`, { token: TI(), body: [{ id: "head1", insert: { position: "after", element: { elType: "widget", widgetType: "polylang-language-switcher", settings: { layout: "horizontal" } } } }] });
+    const data = (await helper(`/inspect&post=${ID}`)).meta._elementor_data;
+    check("vložení widgetu za prvek", ins.status === 200 && data.indexOf("polylang-language-switcher") > data.indexOf("head1") && data.indexOf("polylang-language-switcher") < data.indexOf("text1"), ins.json);
+    check("originál beze změny", (await helper(`/inspect&post=${EL}`)).meta._elementor_data === orig);
+    check("vložení k neexistujícímu 422", (await call("PATCH", `/drafts/${ID}/elements`, { token: TI(), body: [{ id: "nic", insert: { element: { elType: "widget", widgetType: "heading" } } }] })).status === 422);
+    check("neplatný prvek 400", (await call("PATCH", `/drafts/${ID}/elements`, { token: TI(), body: [{ id: "head1", insert: { element: { elType: "skript" } } }] })).status === 400);
+    const rm = await call("PATCH", `/drafts/${ID}/elements`, { token: TI(), body: [{ id: "text1", remove: true }] });
+    check("smazání prvku v konceptu", rm.status === 200 && !(await helper(`/inspect&post=${ID}`)).meta._elementor_data.includes("text1"), rm.json);
+    await call("POST", `/drafts/${ID}/discard`, { token: sign({ scope: "publish", req: "r11", post: EL }, { ttl: 60 }) });
   }
 
   // ---------- Klíčenka 1.3.0: přihlášení beze změny ----------
