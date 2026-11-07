@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.9.1
+ * Version: 0.9.2
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.9.1');
+define('KLICENKA_UPRAVY_VERSION', '0.9.2');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -387,6 +387,13 @@ function klicenka_upravy_clean($value, $key = '')
         return $out;
     }
     if (is_string($value)) {
+        // Dynamický odkaz na pop-up by čištění adresy rozbilo. Tag shortcode by na webu spouštěl kód, ten se zapsat nesmí.
+        if (preg_match('/^\[elementor-tag id="[a-z0-9]+" name="popup" settings="[A-Za-z0-9%._-]*"\]$/', $value)) {
+            return $value;
+        }
+        if (preg_match('/\[elementor-tag\b[^\]]*name="shortcode"/', $value)) {
+            return new WP_Error('invalid', 'Dynamický tag shortcode zapsat nejde.');
+        }
         if (in_array($key, array('url', 'href', 'link'), true)) {
             return $value === '' || $value[0] === '#' ? $value : esc_url_raw($value);
         }
@@ -1079,7 +1086,8 @@ function klicenka_upravy_publish_new($draft, $p)
     $from = (int) $from;
     $base = $from ? get_post($from) : null;
     $conditions = klicenka_upravy_pending_conditions($draft->ID);
-    if ($draft->post_type === 'elementor_library' && $lang === '' && !$conditions) {
+    // Pop-up může otevírat jen odkaz, ostatní šablony by se bez podmínek nikde neukázaly.
+    if ($draft->post_type === 'elementor_library' && $lang === '' && !$conditions && get_post_meta($draft->ID, '_elementor_template_type', true) !== 'popup') {
         return klicenka_upravy_error('invalid', 'Nová šablona nemá podmínky zobrazení, nikde by se neukázala. Nic se nezveřejnilo.', 422);
     }
     if ($conditions !== null && !klicenka_upravy_conditions_manager()) {
@@ -1638,15 +1646,23 @@ add_action('init', function () {
         'numberposts' => 50,
         'fields'      => 'ids',
         'lang'        => '',
-        'meta_query'  => array(
-            array('key' => '_klicenka_upravy_req', 'value' => (string) get_post_meta($page, '_klicenka_upravy_req', true)),
-            array('key' => '_klicenka_upravy_conditions', 'compare' => 'EXISTS'),
-        ),
+        'meta_key'    => '_klicenka_upravy_req',
+        'meta_value'  => (string) get_post_meta($page, '_klicenka_upravy_req', true),
     ));
+    $popups = array();
     foreach ($templates as $t) {
+        if (get_post_meta($t, '_elementor_template_type', true) === 'popup') {
+            $popups[] = (int) $t;
+        }
         if (array_intersect($ids, klicenka_upravy_condition_targets(klicenka_upravy_pending_conditions($t)))) {
             klicenka_upravy_swap_template((int) $t, klicenka_upravy_template_base((int) $t));
         }
+    }
+    // Pop-up, který otevírá odkaz, Elementor vytiskne jen zveřejněný; v tomto požadavku se koncept tak tváří (nic se neukládá).
+    if ($popups) {
+        add_filter('get_post_status', function ($status, $post) use ($popups) {
+            return in_array((int) $post->ID, $popups, true) ? 'publish' : $status;
+        }, 10, 2);
     }
 });
 

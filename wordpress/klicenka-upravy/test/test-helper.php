@@ -50,6 +50,16 @@ add_action('init', function () {
     wp_insert_post(array('post_type' => 'page', 'post_status' => 'publish', 'post_title' => 'Cizí stránka', 'post_content' => '<p>Nesahat</p>', 'post_author' => 1));
 
     // Šablona patičky (Elementor Pro Theme Builder) s podmínkou zobrazení na celém webu.
+    $pop = wp_insert_post(array('post_type' => 'elementor_library', 'post_status' => 'publish', 'post_title' => 'Test Popup', 'post_content' => '', 'post_author' => 1));
+    update_post_meta($pop, '_elementor_edit_mode', 'builder');
+    update_post_meta($pop, '_elementor_template_type', 'popup');
+    update_post_meta($pop, '_elementor_data', wp_slash(wp_json_encode(array(
+        array('id' => 'psec', 'elType' => 'section', 'settings' => array(), 'elements' => array(
+            array('id' => 'pcol', 'elType' => 'column', 'settings' => array('_column_size' => 100), 'elements' => array(
+                array('id' => 'ptext', 'elType' => 'widget', 'widgetType' => 'text-editor', 'settings' => array('editor' => '<p>Menu</p>'), 'elements' => array()),
+            )),
+        )),
+    ))));
     $f = wp_insert_post(array('post_type' => 'elementor_library', 'post_status' => 'publish', 'post_title' => 'Test Patička', 'post_content' => '', 'post_author' => 1));
     update_post_meta($f, '_elementor_edit_mode', 'builder');
     update_post_meta($f, '_elementor_template_type', 'footer');

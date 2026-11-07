@@ -437,10 +437,27 @@ try {
     const prevT = await call("GET", `/drafts/${NF}/preview-link`, { token: TN(NF) });
     check("náhled šablony vede na její stránku", prevT.json?.url?.includes(`page_id=${NP}`), prevT.json);
 
+    // Pop-up jako kopie, otevírá ho odkaz v patičce: bez podmínek, dynamický odkaz musí přežít beze změny.
+    const npop = await call("POST", "/pages/new", { token: TN(), body: { title: "Popup EN", from: stC.pages["Test Popup"] } });
+    const NPOP = npop.json?.id;
+    check("kopie pop-upu 200", npop.status === 200 && NPOP > 0, npop.json);
+    await call("PATCH", `/drafts/${NPOP}/elements`, { token: TN(NPOP), body: [{ id: "ptext", settings: { editor: "<p>English popup</p>" } }] });
+    const tag = `[elementor-tag id="68842e0" name="popup" settings="%7B%22popup%22%3A%22${NPOP}%22%7D"]`;
+    const pd = await call("PATCH", `/drafts/${NF}/elements`, { token: TN(NF), body: [{ id: "fbtn", settings: { __dynamic__: { link: tag } } }] });
+    const nfData = (await helper(`/inspect&post=${NF}`)).meta._elementor_data;
+    check("dynamický odkaz na pop-up zůstane beze změny", pd.status === 200 && nfData.includes('name=\\"popup\\"') && !nfData.includes("http:\\/\\/[elementor-tag"), nfData.slice(0, 900));
+    const evil = await call("PATCH", `/drafts/${NF}/elements`, { token: TN(NF), body: [{ id: "ftext", settings: { __dynamic__: { editor: '[elementor-tag id="a1" name="shortcode" settings="x"]' } } }] });
+    check("dynamický tag shortcode 400", evil.status === 400, evil.json);
+    const ph2 = await (await fetch(prev.json.url + `&x=${Date.now()}`)).text();
+    check("náhled vytiskne koncept pop-upu", ph2.includes("English popup") && ph2.includes(`data-elementor-id="${NPOP}"`), ph2.slice(-800));
+
     const pub1 = await call("POST", `/drafts/${NP}/publish`, { token: PUB(NP) });
     const pub2 = await call("POST", `/drafts/${NF}/publish`, { token: PUB(NF) });
     check("zveřejnění stránky i šablony 200", pub1.status === 200 && pub2.status === 200, [pub1.json, pub2.json]);
+    const pub4 = await call("POST", `/drafts/${NPOP}/publish`, { token: PUB(NPOP) });
+    check("pop-up bez podmínek se zveřejní", pub4.status === 200, pub4.json);
     const live = await html(`page_id=${NP}`);
+    check("živá stránka vytiskne pop-up z odkazu", live.includes("English popup"), live.slice(-800));
     check("nová stránka má vlastní patičku", live.includes("English footer") && !shows(live, FOOT3), live.slice(-1500));
     check("ostatní stránky mají společnou", shows(await html(`page_id=${PAGE}`), FOOT3) && !(await html(`page_id=${OTHER}`)).includes("English footer"));
     const rb = await call("POST", `/pages/${NF}/rollback`, { token: PUB(NF) });
