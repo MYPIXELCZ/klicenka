@@ -3,6 +3,7 @@
 // Použití:  [PHP_VERSION=7.4] node wordpress/klicenka-upravy/test/run.mjs [--no-elementor] [--keep]
 // ELEMENTOR_PRO_DIR=<složka plugins/elementor-pro> přidá testy podmínek zobrazení se skutečným Elementorem Pro (a motivem Hello).
 // Spustí lokální JWKS (testovací klíč Ed25519, jen v paměti) a Playground na :3105, po testu vše zastaví a smaže.
+import zlib from "node:zlib";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -215,6 +216,18 @@ try {
   const fd = (buf, name, type) => { const f = new FormData(); f.append("file", new Blob([buf], { type }), name); f.append("alt", "Testovací obrázek"); return f; };
   const up = await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(png, "foto.png", "image/png") });
   check("upload PNG 200", up.status === 200 && up.json?.id > 0 && up.json.mime === "image/png", up.json);
+  const widePng = (w, h) => {
+    const chunk = (type, data) => {
+      const body = Buffer.concat([Buffer.from(type), data]);
+      const head = Buffer.alloc(4); head.writeUInt32BE(data.length);
+      const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body));
+      return Buffer.concat([head, body, crc]);
+    };
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr.set([8, 2, 0, 0, 0], 8);
+    return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(Buffer.alloc((w * 3 + 1) * h))), chunk("IEND", Buffer.alloc(0))]);
+  };
+  const wide = await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(widePng(3000, 20), "siroky-banner.png", "image/png") });
+  check("obrázek nad 2560 px WordPress nezmenší", wide.status === 200 && wide.json?.width === 3000 && !wide.json?.url?.includes("-scaled"), wide.json);
   check("upload textu jako .png 415", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.from("<?php echo 1;"), "x.png", "image/png") })).status === 415);
   check("upload SVG 415", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), "x.svg", "image/svg+xml") })).status === 415);
   check("upload nad limit 413", (await call("POST", `/drafts/${D}/media`, { token: T(), form: fd(Buffer.concat([png, Buffer.alloc(310000)]), "big.png", "image/png") })).status === 413);

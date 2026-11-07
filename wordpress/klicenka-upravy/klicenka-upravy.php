@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.9.4
+ * Version: 0.9.5
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.9.4');
+define('KLICENKA_UPRAVY_VERSION', '0.9.5');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -1540,7 +1540,10 @@ function klicenka_upravy_rest_media(WP_REST_Request $request)
         return $allowed;
     };
     add_filter('upload_mimes', $mimes, 99);
+    // Složený banner má záměrně víc než 2560 px, aby fotka v něm měla plné rozlišení. WordPress by ho jinak zmenšil.
+    add_filter('big_image_size_threshold', '__return_false', 99);
     $att = media_handle_sideload($sideload, $draft->ID, null, array('post_author' => get_current_user_id()));
+    remove_filter('big_image_size_threshold', '__return_false', 99);
     remove_filter('upload_mimes', $mimes, 99);
     if (is_wp_error($att)) {
         return klicenka_upravy_error('failed', 'Soubor se nepodařilo uložit: ' . $att->get_error_message(), 500);
