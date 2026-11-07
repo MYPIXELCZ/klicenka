@@ -64,6 +64,12 @@ add_action('init', function () {
     ))));
 });
 
+// Co v praxi dělá Connect Polylang for Elementor: šablony jsou překládané.
+add_filter('pll_get_post_types', function ($types) {
+    $types['elementor_library'] = 'elementor_library';
+    return $types;
+});
+
 // Polylang (jen když běží): čeština a němčina, německá kopie stránky Test Elementor propojená jako překlad.
 add_action('init', function () {
     if (!function_exists('pll_set_post_language') || get_option('kut_pll') || !get_option('kut_fixtures')) {

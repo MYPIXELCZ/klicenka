@@ -375,6 +375,93 @@ try {
     check("jazyk a překlady u stránky", cs?.lang === "cs" && cs?.translations?.de === DE && de?.translations?.cs === EL, { cs, de });
   }
 
+  // ---------- Nová stránka ----------
+  console.log("\nNová stránka");
+  {
+    const TN = (post) => sign({ req: "r9", ...(post ? { post } : {}) });
+    const PUB = (post, req = "r9") => sign({ scope: "publish", req, post }, { ttl: 60 });
+    const newPage = (body, tok = TN()) => call("POST", "/pages/new", { token: tok, body });
+    check("bez tokenu 401", (await call("POST", "/pages/new", { body: { title: "x" } })).status === 401);
+    check("bez názvu 400", (await newPage({})).status === 400);
+    check("neexistující základ 404", (await newPage({ title: "x", from: 99999 })).status === 404);
+    if (!withPolylang) check("jazyk bez Polylangu 422", (await newPage({ title: "x", lang: "en" })).status === 422);
+    const before = await helper(`/inspect&post=${CIZI}`);
+    const n1 = await newPage({ title: "Nová kopie", slug: "nova-kopie", from: CIZI });
+    const N = n1.json?.id;
+    check("koncept z kopie 200", n1.status === 200 && n1.json.created === true && N > 0, n1.json);
+    check("opakované založení vrátí stejný koncept", (await newPage({ title: "Nová kopie", slug: "nova-kopie", from: CIZI })).json?.id === N);
+    const nIns = await helper(`/inspect&post=${N}`);
+    check("koncept je kopie, autor claude-upravy, základ beze změny", nIns.post.status === "draft" && nIns.post.content === "<p>Nesahat</p>" && nIns.author === "claude-upravy" && (await helper(`/inspect&post=${CIZI}`)).post.modified === before.post.modified, nIns.post);
+    check("koncept s tokenem jiné stránky 404", (await call("GET", `/drafts/${N}/outline`, { token: TN(CIZI) })).status === 404);
+    const pp = await call("PATCH", `/drafts/${N}/elements`, { token: TN(N), body: [{ id: "@post", settings: { title: "New copy", slug: "new-copy", content: "<p>Translated</p><script>alert(1)</script>" } }] });
+    const nOut = await call("GET", `/drafts/${N}/outline`, { token: TN(N) });
+    check("@post změní název, adresu a obsah, skript ne", pp.status === 200 && nOut.json?.new_page?.title === "New copy" && nOut.json.new_page.slug === "new-copy" && nOut.json.new_page.content.includes("Translated") && !nOut.json.new_page.content.includes("script"), nOut.json);
+    check("@post u kopie existující stránky 422", (await call("POST", `/pages/${CIZI}/duplicate`, { token: TN(CIZI) }).then((d) => call("PATCH", `/drafts/${d.json.id}/elements`, { token: TN(CIZI), body: [{ id: "@post", settings: { title: "x" } }] }))).status === 422);
+    const nl = await call("GET", `/drafts/${N}/preview-link`, { token: TN(N) });
+    check("náhled nového konceptu", (await (await fetch(nl.json.url)).text()).includes("Translated"), nl.json);
+    check("před zveřejněním web stránku nemá", (await fetch(`${WP}/?page_id=${N}`)).status === 404);
+    check("drafts token nezveřejní", [401, 403].includes((await call("POST", `/drafts/${N}/publish`, { token: TN(N) })).status) && (await helper(`/inspect&post=${N}`)).post.status === "draft");
+    const np = await call("POST", `/drafts/${N}/publish`, { token: PUB(N) });
+    const nP = await helper(`/inspect&post=${N}`);
+    check("zveřejnění: nová stránka, autor není claude-upravy", np.status === 200 && np.json.new === true && np.json.published === N && nP.post.status === "publish" && nP.author !== "claude-upravy", { np: np.json, a: nP.author });
+    check("web stránku ukazuje", (await (await fetch(`${WP}/?page_id=${N}`, { redirect: "follow" })).text()).includes("Translated"));
+    check("základ se nezměnil", (await helper(`/inspect&post=${CIZI}`)).post.content === "<p>Nesahat</p>" && (await helper(`/inspect&post=${CIZI}`)).post.modified === before.post.modified);
+    check("návrat cizím požadavkem nestáhne", (await call("POST", `/pages/${N}/rollback`, { token: PUB(N, "jiny") })).status !== 200 && (await helper(`/inspect&post=${N}`)).post.status === "publish");
+    const nr = await call("POST", `/pages/${N}/rollback`, { token: PUB(N) });
+    const nR = await helper(`/inspect&post=${N}`);
+    check("návrat: zpět koncept, nic smazáno", nr.status === 200 && nr.json.new === true && nR.post.status === "draft" && nR.post.content.includes("Translated") && nR.author === "claude-upravy", nr.json);
+    check("po návratu jde koncept upravit i založit znovu", (await call("GET", `/drafts/${N}/outline`, { token: TN(N) })).status === 200 && (await newPage({ title: "Nová kopie", slug: "nova-kopie", from: CIZI })).json?.id === N);
+    const nd = await call("POST", `/drafts/${N}/discard`, { token: PUB(N) });
+    check("zahození nového konceptu", nd.status === 200 && (await helper(`/inspect&post=${N}`)).post.status === "trash", nd.json);
+    const blank = await newPage({ title: "Prázdná" });
+    const B = blank.json?.id;
+    check("prázdná stránka bez základu", blank.status === 200 && (await helper(`/inspect&post=${B}`)).post.content === "");
+    await call("POST", `/drafts/${B}/discard`, { token: PUB(B) });
+    if (withElementor) {
+      const ne = await newPage({ title: "Elementor kopie", from: EL });
+      const NE = ne.json?.id;
+      const neI = await helper(`/inspect&post=${NE}`), elI = await helper(`/inspect&post=${EL}`);
+      check("kopie Elementoru: stejná data, editor elementor", ne.json?.editor === "elementor" && neI.meta._elementor_data === elI.meta._elementor_data, ne.json);
+      const up = await call("PATCH", `/drafts/${NE}/elements`, { token: TN(NE), body: [{ id: "head1", settings: { title: "English heading" } }] });
+      check("překlad prvku jen v kopii", up.status === 200 && (await helper(`/inspect&post=${NE}`)).meta._elementor_data.includes("English heading") && !(await helper(`/inspect&post=${EL}`)).meta._elementor_data.includes("English heading"), up.json);
+      await call("POST", `/drafts/${NE}/discard`, { token: PUB(NE) });
+    }
+    if (withPolylang) {
+      await fetch(`${WP}/`);
+      const stL = await call("GET", "/status");
+      check("status: jazyky webu", stL.json?.languages?.includes("de") && stL.json?.features?.includes("new-pages"), stL.json);
+      check("neznámý jazyk 422", (await newPage({ title: "x", from: GB, lang: "fr" })).status === 422);
+      const stP2 = await helper("/state");
+      check("existující překlad 409", (await newPage({ title: "x", from: EL, lang: "de" })).status === 409, stP2.pages["Test Elementor DE"]);
+      const tl = await newPage({ title: "Test Gutenberg DE", slug: "test-gutenberg-de", from: GB, lang: "de" });
+      const TL = tl.json?.id;
+      check("koncept překladu 200", tl.status === 200 && TL > 0, tl.json);
+      const tlOut = await call("GET", `/drafts/${TL}/outline`, { token: TN(TL) });
+      check("koncept má jazyk, propojený ještě není", tlOut.json?.new_page?.lang === "de" && !tlOut.json.new_page.translations?.cs, tlOut.json?.new_page);
+      const tp = await call("POST", `/drafts/${TL}/publish`, { token: PUB(TL) });
+      const list1 = (await call("GET", "/pages&type=page", { token: sign({ req: "r9" }) })).json.pages;
+      const gbI = list1.find((x) => x.id === GB), tlI = list1.find((x) => x.id === TL);
+      check("zveřejnění propojí překlad, základ dostane výchozí jazyk", tp.status === 200 && gbI?.translations?.de === TL && tlI?.lang === "de" && !!gbI?.lang, { gbI, tlI });
+      if (withElementor) {
+        const FOOT2 = stP2.pages["Test Patička"];
+        check("šablona bez jazyka 400", (await newPage({ title: "x", from: FOOT2 })).status === 400);
+        const ft = await newPage({ title: "Fußzeile", from: FOOT2, lang: "de" });
+        const FT = ft.json?.id;
+        const ftM = (await helper(`/inspect&post=${FT}`)).meta;
+        check("jazyková verze šablony: typ ano, podmínky ne", ft.status === 200 && ftM._elementor_template_type === "footer" && !("_elementor_conditions" in ftM), ft.json);
+        const fCond = (await helper(`/inspect&post=${FOOT2}`)).meta._elementor_conditions;
+        const fp2 = await call("POST", `/drafts/${FT}/publish`, { token: PUB(FT) });
+        const libs = (await call("GET", "/pages&type=elementor_library", { token: sign({ req: "r9" }) })).json.pages;
+        check("šablona propojená jako překlad, podmínky originálu beze změny", fp2.status === 200 && libs.find((x) => x.id === FOOT2)?.translations?.de === FT && (await helper(`/inspect&post=${FOOT2}`)).meta._elementor_conditions === fCond, libs.map((x) => [x.id, x.lang, x.translations]));
+        const fr2 = await call("POST", `/pages/${FT}/rollback`, { token: PUB(FT) });
+        check("návrat šablony do konceptu", fr2.status === 200 && (await helper(`/inspect&post=${FT}`)).post.status === "draft", fr2.json);
+      }
+      const tr = await call("POST", `/pages/${TL}/rollback`, { token: PUB(TL) });
+      const list2 = (await call("GET", "/pages&type=page", { token: sign({ req: "r9" }) })).json.pages;
+      check("návrat odpojí překlad", tr.status === 200 && !list2.find((x) => x.id === GB)?.translations?.de && (await helper(`/inspect&post=${TL}`)).post.status === "draft", list2.find((x) => x.id === GB));
+    }
+  }
+
   // ---------- Klíčenka 1.3.0: přihlášení beze změny ----------
   console.log("\nKlíčenka přihlášení (zpětná kompatibilita)");
   const login = (tok) => fetch(`${WP}/wp-login.php?action=klicenka`, { method: "POST", body: new URLSearchParams({ token: tok }), redirect: "manual" });

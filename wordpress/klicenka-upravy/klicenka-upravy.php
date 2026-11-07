@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.5.0
+ * Version: 0.6.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -16,6 +16,9 @@
  * publikace jen z trackeru, záloha a návrat. Podmínky zobrazení šablon (_elementor_conditions) se nekopírují ani nemění,
  * koncept šablony se proto na webu nikdy neuplatní; náhled ho na stránce vymění jen pro požadavek s podepsaným odkazem.
  *
+ * Nová stránka (POST /pages/new): koncept prázdný nebo jako kopie existující; zveřejnění zveřejní koncept, nic nepřepíše,
+ * s Polylangem ho propojí jako překlad; návrat ho stáhne do konceptu. Polylang plugin neinstaluje, jen ho použije.
+ *
  * Token: hlavička typ "klicenka-upravy+jwt", claimy jako u Klíčenky (iss, aud, sub, act, jti, iat, exp)
  * a navíc scope (drafts | publish), req (id požadavku) a post (id originální stránky).
  * Posílá se v "Authorization: Bearer …" nebo v "X-Klicenka-Token: …". Nikdy v URL.
@@ -25,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.5.0');
+define('KLICENKA_UPRAVY_VERSION', '0.6.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -716,6 +719,192 @@ function klicenka_upravy_rest_duplicate(WP_REST_Request $request)
     return rest_ensure_response(array('id' => (int) $id, 'created' => true, 'original' => $orig->ID, 'editor' => klicenka_upravy_editor($orig)));
 }
 
+/* ---------- Nová stránka ---------- */
+
+/**
+ * Nová stránka jako koncept, prázdná nebo jako kopie existující (základ pro překlad). Originál se nemění.
+ * Koncept je sám svým „originálem“ (_klicenka_upravy_source = vlastní id), takže tokeny pro post = koncept, úpravy,
+ * náhled i zahození fungují jako u kopie. Opakované volání se stejným základem, jazykem a adresou vrátí stejný koncept.
+ */
+function klicenka_upravy_rest_new(WP_REST_Request $request)
+{
+    $p = klicenka_upravy_payload();
+    $b = (array) $request->get_json_params();
+    $title = trim(sanitize_text_field((string) ($b['title'] ?? '')));
+    if ($title === '') {
+        return klicenka_upravy_error('invalid', 'Nová stránka potřebuje název.', 400);
+    }
+    $from = (int) ($b['from'] ?? 0);
+    $base = null;
+    if ($from) {
+        $base = get_post($from);
+        if (!$base || !in_array($base->post_type, array('page', 'post', 'elementor_library'), true) || !in_array($base->post_status, array('publish', 'private'), true)
+            || get_post_meta($from, '_klicenka_upravy_source', true) !== '') {
+            return klicenka_upravy_error('not_found', 'Základní stránka neexistuje.', 404);
+        }
+    }
+    // Šablona Elementoru jen jako jazyková verze (hlavička, patička…); překládat je umí až Connect Polylang for Elementor.
+    $template = $base && $base->post_type === 'elementor_library';
+    if ($template) {
+        if (trim((string) ($b['lang'] ?? '')) === '' || get_post_meta($from, '_elementor_template_type', true) === 'kit') {
+            return klicenka_upravy_error('invalid', 'Ze šablony jde založit jen jazyková verze.', 400);
+        }
+        if (function_exists('pll_is_translated_post_type') && !pll_is_translated_post_type('elementor_library')) {
+            return klicenka_upravy_error('no_template_translation', 'Překlad šablon potřebuje plugin Connect Polylang for Elementor.', 422);
+        }
+    }
+    $type = $base ? $base->post_type : (($b['type'] ?? 'page') === 'post' ? 'post' : 'page');
+    if (!in_array($type, klicenka_upravy_post_types(), true)) {
+        return klicenka_upravy_error('invalid', 'Tento typ obsahu není povolený.', 400);
+    }
+    $lang = strtolower(trim((string) ($b['lang'] ?? '')));
+    if ($lang !== '') {
+        if (!function_exists('pll_languages_list') || !function_exists('pll_set_post_language')) {
+            return klicenka_upravy_error('no_polylang', 'Jazykové verze potřebují plugin Polylang, na webu není.', 422);
+        }
+        if (!in_array($lang, (array) pll_languages_list(), true)) {
+            return klicenka_upravy_error('no_language', 'Jazyk „' . sanitize_text_field($lang) . '“ na webu není nastavený.', 422);
+        }
+        if ($base && function_exists('pll_get_post') && (int) pll_get_post($base->ID, $lang) > 0 && (int) pll_get_post($base->ID, $lang) !== $base->ID) {
+            return klicenka_upravy_error('translation_exists', 'Tato jazyková verze už existuje.', 409);
+        }
+    }
+    $slug = sanitize_title((string) ($b['slug'] ?? '')) ?: sanitize_title($title);
+    $key = $from . '|' . $lang . '|' . $slug;
+    $existing = get_posts(array(
+        'post_type'   => $type,
+        'post_status' => 'draft',
+        'numberposts' => 1,
+        'fields'      => 'ids',
+        'lang'        => '',
+        'meta_query'  => array(
+            array('key' => '_klicenka_upravy_new', 'value' => $key),
+            array('key' => '_klicenka_upravy_req', 'value' => $p['req']),
+        ),
+    ));
+    if ($existing) {
+        return rest_ensure_response(array('id' => (int) $existing[0], 'created' => false, 'editor' => klicenka_upravy_editor(get_post($existing[0]))));
+    }
+    $parent = isset($b['parent']) ? (int) $b['parent'] : ($base ? (int) $base->post_parent : 0);
+    if (!isset($b['parent']) && $parent && $lang !== '' && function_exists('pll_get_post')) {
+        // Nadřazená stránka v jazyce překladu, když existuje; jinak bez nadřazené.
+        $parent = (int) pll_get_post($parent, $lang);
+    }
+    $id = klicenka_upravy_save_content(array(
+        'post_type'      => $type,
+        'post_status'    => 'draft',
+        'post_author'    => get_current_user_id(),
+        'post_title'     => $title,
+        'post_name'      => $slug,
+        'post_content'   => $base ? $base->post_content : '',
+        'post_excerpt'   => $base ? $base->post_excerpt : '',
+        'post_parent'    => $parent,
+        'menu_order'     => $base ? $base->menu_order : 0,
+        'comment_status' => 'closed',
+        'ping_status'    => 'closed',
+    ));
+    if (is_wp_error($id) || !$id) {
+        return klicenka_upravy_error('failed', 'Koncept se nepodařilo založit.', 500);
+    }
+    if ($base) {
+        klicenka_upravy_write_meta($id, klicenka_upravy_raw_meta($base->ID));
+    }
+    update_post_meta($id, '_klicenka_upravy_source', (string) $id);
+    update_post_meta($id, '_klicenka_upravy_req', $p['req']);
+    update_post_meta($id, '_klicenka_upravy_new', $key);
+    if ($lang !== '') {
+        pll_set_post_language($id, $lang);
+    }
+    if ($template) {
+        // Typ šablony i v taxonomii, podle ní ji Elementor řadí; podmínky zobrazení se nekopírují, překlad přebírá ty z originálu.
+        wp_set_object_terms($id, wp_get_object_terms($from, 'elementor_library_type', array('fields' => 'slugs')), 'elementor_library_type');
+    }
+    if (klicenka_upravy_is_elementor($id)) {
+        klicenka_upravy_elementor_refresh($id);
+    }
+    klicenka_upravy_log('new', $p, array('draft' => (int) $id, 'from' => $from, 'lang' => $lang));
+    return rest_ensure_response(array('id' => (int) $id, 'created' => true, 'editor' => klicenka_upravy_editor(get_post($id))));
+}
+
+/** Zveřejnění nové stránky: zveřejní se koncept sám, žádná existující stránka se nepřepíše. S Polylangem se propojí jako překlad. */
+function klicenka_upravy_publish_new($draft, $p)
+{
+    list($from, $lang) = array_pad(explode('|', (string) get_post_meta($draft->ID, '_klicenka_upravy_new', true)), 2, '');
+    $from = (int) $from;
+    $base = $from ? get_post($from) : null;
+    if ($lang !== '' && $base && function_exists('pll_get_post') && (int) pll_get_post($from, $lang) > 0 && (int) pll_get_post($from, $lang) !== $draft->ID) {
+        return klicenka_upravy_error('conflict', 'Tato jazyková verze už mezitím vznikla, nic se nezveřejnilo.', 409);
+    }
+    $author = $base ? (int) $base->post_author : 0;
+    if (!$author) {
+        $admins = get_users(array('role' => 'administrator', 'number' => 1, 'fields' => 'ID'));
+        $author = $admins ? (int) $admins[0] : (int) $draft->post_author;
+    }
+    $res = klicenka_upravy_save_content(array(
+        'ID'            => $draft->ID,
+        'post_status'   => 'publish',
+        'post_author'   => $author,
+        'post_date'     => current_time('mysql'),
+        'post_date_gmt' => current_time('mysql', 1),
+        'edit_date'     => true,
+    ));
+    if (is_wp_error($res)) {
+        return klicenka_upravy_error('failed', 'Zveřejnění selhalo, stránka zůstala konceptem.', 500);
+    }
+    update_post_meta($draft->ID, '_klicenka_upravy_created', wp_json_encode(array('req' => $p['req'], 'key' => get_post_meta($draft->ID, '_klicenka_upravy_new', true))));
+    // Od teď je to běžná stránka: další úpravy jdou přes kopii a návrat jako u každé jiné.
+    delete_post_meta($draft->ID, '_klicenka_upravy_source');
+    delete_post_meta($draft->ID, '_klicenka_upravy_req');
+    delete_post_meta($draft->ID, '_klicenka_upravy_new');
+    if ($lang !== '' && $base && function_exists('pll_save_post_translations')) {
+        $base_lang = pll_get_post_language($from);
+        if (!$base_lang && function_exists('pll_default_language')) {
+            // Stránky z doby před Polylangem nemají jazyk; bez něj nejde překlad propojit.
+            $base_lang = pll_default_language();
+            pll_set_post_language($from, $base_lang);
+        }
+        if ($base_lang && $base_lang !== $lang) {
+            $tr = (array) pll_get_post_translations($from);
+            $tr[$base_lang] = $from;
+            $tr[$lang] = $draft->ID;
+            pll_save_post_translations($tr);
+        }
+    }
+    $css = klicenka_upravy_is_elementor($draft->ID) ? klicenka_upravy_elementor_refresh($draft->ID) : null;
+    if ($draft->post_type === 'elementor_library') {
+        klicenka_upravy_purge_all();
+    }
+    clean_post_cache($draft->ID);
+    klicenka_upravy_log('publish', $p, array('draft' => $draft->ID, 'new' => true, 'elementor_css' => $css));
+    return rest_ensure_response(array('published' => $draft->ID, 'new' => true, 'link' => get_permalink($draft->ID), 'elementor_css' => $css));
+}
+
+/** Návrat nové stránky: stáhne se zpátky do konceptu a odpojí od překladů. Nic se nesmaže. */
+function klicenka_upravy_rollback_new($post, $created, $p)
+{
+    if (klicenka_upravy_backups($post->ID)) {
+        return klicenka_upravy_error('conflict', 'Stránka má novější publikovanou úpravu, nejdřív vraťte tu.', 409);
+    }
+    if (function_exists('PLL') && isset(PLL()->model->post) && method_exists(PLL()->model->post, 'delete_translation')) {
+        PLL()->model->post->delete_translation($post->ID);
+    }
+    $user = get_user_by('login', KLICENKA_UPRAVY_USER);
+    $res = klicenka_upravy_save_content(array('ID' => $post->ID, 'post_status' => 'draft', 'post_author' => $user ? $user->ID : $post->post_author));
+    if (is_wp_error($res)) {
+        return klicenka_upravy_error('failed', 'Stažení stránky selhalo.', 500);
+    }
+    update_post_meta($post->ID, '_klicenka_upravy_source', (string) $post->ID);
+    update_post_meta($post->ID, '_klicenka_upravy_req', $p['req']);
+    update_post_meta($post->ID, '_klicenka_upravy_new', (string) $created['key']);
+    delete_post_meta($post->ID, '_klicenka_upravy_created');
+    if ($post->post_type === 'elementor_library') {
+        klicenka_upravy_purge_all();
+    }
+    clean_post_cache($post->ID);
+    klicenka_upravy_log('rollback', $p, array('new' => true));
+    return rest_ensure_response(array('restored' => $post->ID, 'new' => true, 'draft' => $post->ID));
+}
+
 function klicenka_upravy_rest_outline(WP_REST_Request $request)
 {
     $draft = klicenka_upravy_draft($request['id']);
@@ -725,6 +914,12 @@ function klicenka_upravy_rest_outline(WP_REST_Request $request)
     $ids = array_filter(array_map('trim', explode(',', (string) $request->get_param('ids'))));
     $editor = klicenka_upravy_editor($draft);
     $out = array('id' => $draft->ID, 'original' => (int) klicenka_upravy_payload()['post'], 'editor' => $editor) + klicenka_upravy_template_info($draft);
+    if (get_post_meta($draft->ID, '_klicenka_upravy_new', true) !== '') {
+        $out['new_page'] = array('title' => $draft->post_title, 'slug' => $draft->post_name, 'excerpt' => $draft->post_excerpt) + klicenka_upravy_lang_info($draft);
+        if ($editor !== 'elementor') {
+            $out['new_page']['content'] = $draft->post_content;
+        }
+    }
     $page = get_post_meta($draft->ID, '_elementor_page_settings', true);
     if (in_array('@page', $ids, true)) {
         $out['page_settings'] = is_array($page) ? $page : (object) array();
@@ -787,6 +982,30 @@ function klicenka_upravy_rest_elements(WP_REST_Request $request)
             return klicenka_upravy_error('invalid', "Položka $i: " . $s->get_error_message(), 400);
         }
         $clean[] = array('id' => (string) $c['id'], 'settings' => $s);
+    }
+    // „@post“ = název, adresa, výtah a obsah, jen u konceptu nové stránky (u kopie by zveřejnění přepsalo jen obsah a meta).
+    foreach ($clean as $k => $c) {
+        if ($c['id'] !== '@post') {
+            continue;
+        }
+        if (get_post_meta($draft->ID, '_klicenka_upravy_new', true) === '') {
+            return klicenka_upravy_error('invalid', '@post jde jen u nové stránky.', 422);
+        }
+        $fields = array('ID' => $draft->ID);
+        foreach (array('title' => 'post_title', 'excerpt' => 'post_excerpt', 'content' => 'post_content') as $from => $to) {
+            if (isset($c['settings'][$from]) && is_string($c['settings'][$from])) {
+                $fields[$to] = $from === 'title' ? sanitize_text_field($c['settings'][$from]) : $c['settings'][$from];
+            }
+        }
+        if (isset($c['settings']['slug']) && is_string($c['settings']['slug'])) {
+            $fields['post_name'] = sanitize_title($c['settings']['slug']);
+        }
+        $res = klicenka_upravy_save_content($fields);
+        if (is_wp_error($res)) {
+            return klicenka_upravy_error('failed', 'Koncept se nepodařilo uložit.', 500);
+        }
+        $draft = get_post($draft->ID);
+        unset($clean[$k]);
     }
     // „@page“ = nastavení dokumentu Elementoru (_elementor_page_settings); u kitu globální barvy, písma a logo.
     foreach ($clean as $k => $c) {
@@ -1041,7 +1260,9 @@ function klicenka_upravy_preview_template()
     $post = get_post($id);
     $source = $post ? (int) get_post_meta($id, '_klicenka_upravy_source', true) : 0;
     if ($post && $post->post_status === 'draft' && $post->post_type === 'elementor_library' && $source > 0) {
-        $res = array($id, $source);
+        // Nová jazyková verze je sama svým zdrojem; na stránce se v náhledu mění šablona, ze které vznikla.
+        $from = (int) get_post_meta($id, '_klicenka_upravy_new', true);
+        $res = array($id, $source === $id && $from > 0 ? $from : $source);
     }
     return $res;
 }
@@ -1164,6 +1385,9 @@ function klicenka_upravy_rest_publish(WP_REST_Request $request)
         return $draft;
     }
     $p = klicenka_upravy_payload();
+    if (get_post_meta($draft->ID, '_klicenka_upravy_new', true) !== '') {
+        return klicenka_upravy_publish_new($draft, $p);
+    }
     $orig = klicenka_upravy_original($p['post']);
     if (is_wp_error($orig)) {
         return $orig;
@@ -1240,6 +1464,10 @@ function klicenka_upravy_rest_rollback(WP_REST_Request $request)
         return $orig;
     }
     $p = klicenka_upravy_payload();
+    $created = json_decode((string) get_post_meta($orig->ID, '_klicenka_upravy_created', true), true);
+    if (is_array($created) && (string) ($created['req'] ?? '') === (string) $p['req']) {
+        return klicenka_upravy_rollback_new($orig, $created, $p);
+    }
     $backups = klicenka_upravy_backups($orig->ID);
     if (!$backups || !isset($backups[0]['snapshot'])) {
         return klicenka_upravy_error('not_found', 'Stránka nemá zálohu.', 404);
@@ -1274,6 +1502,9 @@ function klicenka_upravy_rest_status()
         'version'   => KLICENKA_UPRAVY_VERSION,
         'klicenka'  => defined('KLICENKA_PLUGIN_VERSION') ? KLICENKA_PLUGIN_VERSION : null,
         'elementor' => defined('ELEMENTOR_VERSION'),
+        // Spouštěč podle toho pozná, co web umí: nové stránky a jazyky Polylangu.
+        'features'  => array('new-pages'),
+        'languages' => function_exists('pll_languages_list') ? array_values((array) pll_languages_list()) : null,
     ));
 }
 
@@ -1286,6 +1517,7 @@ add_action('rest_api_init', function () {
     };
     register_rest_route(KLICENKA_UPRAVY_NS, '/status', array('methods' => 'GET', 'callback' => 'klicenka_upravy_rest_status', 'permission_callback' => '__return_true'));
     register_rest_route(KLICENKA_UPRAVY_NS, '/pages', array('methods' => 'GET', 'callback' => 'klicenka_upravy_rest_pages', 'permission_callback' => $auth('drafts', false)));
+    register_rest_route(KLICENKA_UPRAVY_NS, '/pages/new', array('methods' => 'POST', 'callback' => 'klicenka_upravy_rest_new', 'permission_callback' => $auth('drafts', false)));
     register_rest_route(KLICENKA_UPRAVY_NS, "/pages/$id/duplicate", array('methods' => 'POST', 'callback' => 'klicenka_upravy_rest_duplicate', 'permission_callback' => $auth('drafts')));
     register_rest_route(KLICENKA_UPRAVY_NS, "/drafts/$id/outline", array('methods' => 'GET', 'callback' => 'klicenka_upravy_rest_outline', 'permission_callback' => $auth('drafts')));
     register_rest_route(KLICENKA_UPRAVY_NS, "/drafts/$id/elements", array('methods' => 'PATCH', 'callback' => 'klicenka_upravy_rest_elements', 'permission_callback' => $auth('drafts')));
