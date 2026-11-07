@@ -45,6 +45,8 @@ V URL se nikdy nečte. Díky jinému `typ` přihlašovací token nefunguje tady 
 | `POST drafts/{id}/publish` | publish | záloha originálu (vlastní meta, poslední 3) + revize WP, přepis obsahu, výtahu a meta z konceptu, přegenerování CSS Elementoru, obrázky konceptu se přesunou k originálu, koncept do koše. Když se originál mezitím změnil: 409, přepsat jde s `{"force": true}` |
 | `POST pages/{id}/rollback` | publish | obnoví poslední zálohu, jen když patří stejnému `req` (jinak 409) |
 
+Podmínky zobrazení (jen s Elementorem Pro, `status.features` pak obsahuje `template-conditions`): položka `{"id": "@conditions", "settings": {"conditions": ["include/singular/page/123"]}}` je celý nový seznam. Koncept si ho drží stranou, na web ho zapíše až zveřejnění, návrat ho vrátí. Jiná hlavička nebo patička pro vybrané stránky = `POST pages/new` s `from` šablony a bez `lang`, pak `@conditions`; konkrétní podmínka má v Elementoru přednost před `include/general`, společná šablona zůstane beze změny. Nová šablona bez podmínek se nezveřejní. Náhled konceptu stránky ukáže šablony téže úpravy, které na ni míří; samotnou výjimku (`exclude`) náhled neukáže.
+
 Název, adresa, autor, stav a šablona originálu zůstávají. Když hosting blokuje `PATCH`, jde `POST` s hlavičkou `X-HTTP-Method-Override: PATCH`.
 
 **Elementor `settings`:** sloučí se do nastavení prvku. Vnořená pole se slučují po klíčích, opakovače po indexech

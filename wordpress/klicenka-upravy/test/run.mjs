@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Test klicenka-upravy na WP Playground (Elementor z wordpress.org + Gutenberg).
 // Použití:  [PHP_VERSION=7.4] node wordpress/klicenka-upravy/test/run.mjs [--no-elementor] [--keep]
+// ELEMENTOR_PRO_DIR=<složka plugins/elementor-pro> přidá testy podmínek zobrazení se skutečným Elementorem Pro (a motivem Hello).
 // Spustí lokální JWKS (testovací klíč Ed25519, jen v paměti) a Playground na :3105, po testu vše zastaví a smaže.
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
@@ -65,13 +66,19 @@ const steps = [
   { step: "setSiteOptions", options: { permalink_structure: "/%postname%/", ...(process.env.NO_LANGS ? { WPLANG: "cs_CZ" } : {}) } },
 ];
 if (withElementor) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "elementor" }, options: { activate: true } });
+const proDir = process.env.ELEMENTOR_PRO_DIR;
+const withPro = !!proDir && withElementor;
+if (withPro) {
+  steps.push({ step: "activatePlugin", pluginPath: "elementor-pro/elementor-pro.php" });
+  steps.push({ step: "installTheme", themeData: { resource: "wordpress.org/themes", slug: "hello-elementor" }, options: { activate: true } });
+}
 const noLangs = !!process.env.NO_LANGS;
 const withPolylang = !!process.env.WITH_POLYLANG || noLangs;
 if (withPolylang) steps.push({ step: "installPlugin", pluginData: { resource: "wordpress.org/plugins", slug: "polylang" }, options: { activate: true } });
 fs.writeFileSync(path.join(tmp, "blueprint.json"), JSON.stringify({ steps, features: { networking: true } }, null, 2));
 
 const wpLog = fs.openSync(path.join(tmp, "playground.log"), "a");
-const child = spawn("npx", ["-y", "@wp-playground/cli@3.1.60", "server", `--port=${WP_PORT}`, `--mount=${mu}:/wordpress/wp-content/mu-plugins`, `--blueprint=${path.join(tmp, "blueprint.json")}`, "--workers=1", `--php=${process.env.PHP_VERSION || "8.3"}`], {
+const child = spawn("npx", ["-y", "@wp-playground/cli@3.1.60", "server", `--port=${WP_PORT}`, `--mount=${mu}:/wordpress/wp-content/mu-plugins`, ...(withPro ? [`--mount=${proDir}:/wordpress/wp-content/plugins/elementor-pro`] : []), `--blueprint=${path.join(tmp, "blueprint.json")}`, "--workers=1", `--php=${process.env.PHP_VERSION || "8.3"}`], {
   stdio: ["ignore", wpLog, wpLog], detached: true,
 });
 let stopped = false;
@@ -376,6 +383,86 @@ try {
     check("jazyk a překlady u stránky", cs?.lang === "cs" && cs?.translations?.de === DE && de?.translations?.cs === EL, { cs, de });
   }
 
+  // ---------- Podmínky zobrazení (Elementor Pro) ----------
+  if (withElementor && !withPro) {
+    console.log("\nPodmínky zobrazení bez Elementoru Pro");
+    const FOOT3 = (await helper("/state")).pages["Test Patička"];
+    const tok = (c = {}) => sign({ req: "r20", post: FOOT3, ...c });
+    const d = await call("POST", `/pages/${FOOT3}/duplicate`, { token: tok() });
+    const pc = await call("PATCH", `/drafts/${d.json?.id}/elements`, { token: tok(), body: [{ id: "@conditions", settings: { conditions: ["include/general"] } }] });
+    check("@conditions bez Pro 422", pc.status === 422 && pc.json?.code === "no_conditions", pc.json);
+    check("status bez funkce podmínek", !(await call("GET", "/status")).json?.features?.includes("template-conditions"));
+  }
+  if (withPro) {
+    console.log("\nPodmínky zobrazení (Elementor Pro)");
+    await helper("/regen", "POST");
+    const stC = await helper("/state");
+    const FOOT3 = stC.pages["Test Patička"], PAGE = stC.pages["Test Elementor"], OTHER = stC.pages["Cizí stránka"];
+    const html = async (q) => (await fetch(`${WP}/?${q}`)).text();
+    const shows = (h, id) => new RegExp(`data-elementor-id="${id}"[^>]*elementor-location-footer|elementor-${id} elementor-location-footer`).test(h);
+    const opt = async () => JSON.stringify((await helper("/regen")).conditions);
+    const TN = (post) => sign({ req: "r20", ...(post ? { post } : {}) });
+    const PUB = (post) => sign({ scope: "publish", req: "r20", post }, { ttl: 60 });
+    check("status hlásí podmínky", (await call("GET", "/status")).json?.features?.includes("template-conditions"));
+    check("společná patička se ukazuje", shows(await html(`page_id=${PAGE}`), FOOT3));
+
+    // Nová stránka a její vlastní patička jako kopie společné.
+    const np = await call("POST", "/pages/new", { token: TN(), body: { title: "English page", slug: "english-page", from: PAGE } });
+    const NP = np.json?.id;
+    const nf = await call("POST", "/pages/new", { token: TN(), body: { title: "Patička EN", from: FOOT3 } });
+    const NF = nf.json?.id;
+    check("kopie šablony bez jazyka 200", nf.status === 200 && NF > 0, nf.json);
+    const nfM = (await helper(`/inspect&post=${NF}`)).meta;
+    check("kopie má typ, podmínky ne", nfM._elementor_template_type === "footer" && !("_elementor_conditions" in nfM), nfM);
+    const kit = stC.kit && (await call("POST", "/pages/new", { token: TN(), body: { title: "x", from: stC.kit } }));
+    if (kit) check("kit jako nová šablona 400", kit.status === 400, kit.json);
+    const before = await opt();
+    const bad = async (conditions) => (await call("PATCH", `/drafts/${NF}/elements`, { token: TN(NF), body: [{ id: "@conditions", settings: { conditions } }] })).status;
+    check("nesmyslná podmínka 400", (await bad(["include/../../x"])) === 400);
+    check("neznámá podmínka 400", (await bad(["include/neexistuje"])) === 400);
+    check("podmínky bez seznamu 400", (await bad("include/general")) === 400);
+    check("@conditions u stránky 422", (await call("PATCH", `/drafts/${NP}/elements`, { token: TN(NP), body: [{ id: "@conditions", settings: { conditions: ["include/general"] } }] })).status === 422);
+    const noCond = await call("POST", `/drafts/${NF}/publish`, { token: PUB(NF) });
+    check("nová šablona bez podmínek se nezveřejní", noCond.status === 422, noCond.json);
+    const ok1 = await call("PATCH", `/drafts/${NF}/elements`, { token: TN(NF), body: [{ id: "@conditions", settings: { conditions: [`include/singular/page/${NP}`] } }, { id: "ftext", settings: { editor: "<p>English footer</p>" } }] });
+    check("podmínka a text v konceptu 200", ok1.status === 200, ok1.json);
+    const out = await call("GET", `/drafts/${NF}/outline`, { token: TN(NF) });
+    check("outline ukáže čekající podmínky", out.json?.conditions?.[0] === `include/singular/page/${NP}` && out.json.conditions_changed === true, out.json);
+    check("koncept nezměnil podmínky na webu", (await opt()) === before);
+    check("živá stránka dál se společnou patičkou", shows(await html(`page_id=${PAGE}`), FOOT3));
+
+    const prev = await call("GET", `/drafts/${NP}/preview-link`, { token: TN(NP) });
+    const ph = await (await fetch(prev.json.url)).text();
+    check("náhled stránky ukáže její patičku", ph.includes("English footer") && !shows(ph, FOOT3), ph.slice(-1500));
+    const prevT = await call("GET", `/drafts/${NF}/preview-link`, { token: TN(NF) });
+    check("náhled šablony vede na její stránku", prevT.json?.url?.includes(`page_id=${NP}`), prevT.json);
+
+    const pub1 = await call("POST", `/drafts/${NP}/publish`, { token: PUB(NP) });
+    const pub2 = await call("POST", `/drafts/${NF}/publish`, { token: PUB(NF) });
+    check("zveřejnění stránky i šablony 200", pub1.status === 200 && pub2.status === 200, [pub1.json, pub2.json]);
+    const live = await html(`page_id=${NP}`);
+    check("nová stránka má vlastní patičku", live.includes("English footer") && !shows(live, FOOT3), live.slice(-1500));
+    check("ostatní stránky mají společnou", shows(await html(`page_id=${PAGE}`), FOOT3) && !(await html(`page_id=${OTHER}`)).includes("English footer"));
+    const rb = await call("POST", `/pages/${NF}/rollback`, { token: PUB(NF) });
+    check("návrat šablony: podmínky pryč, koncept je drží", rb.status === 200 && (await opt()) === before && (await helper(`/inspect&post=${NF}`)).post.status === "draft", [rb.json, await opt()]);
+    check("po návratu zas společná patička", shows(await html(`page_id=${NP}`), FOOT3));
+    check("znovu zveřejněná šablona se vrátí", (await call("POST", `/drafts/${NF}/publish`, { token: PUB(NF) })).status === 200 && (await html(`page_id=${NP}`)).includes("English footer"));
+    await call("POST", `/pages/${NF}/rollback`, { token: PUB(NF) });
+
+    // Změna podmínek existující šablony: záloha a návrat.
+    const orig = (await helper(`/inspect&post=${FOOT3}`)).meta._elementor_conditions;
+    const T3 = (c = {}) => sign({ req: "r21", post: FOOT3, ...c });
+    const P3 = () => sign({ scope: "publish", req: "r21", post: FOOT3 }, { ttl: 60 });
+    const d3 = await call("POST", `/pages/${FOOT3}/duplicate`, { token: T3() });
+    const D3 = d3.json?.id;
+    check("outline kopie ukáže podmínky originálu", (await call("GET", `/drafts/${D3}/outline`, { token: T3() })).json?.conditions?.[0] === "include/general");
+    await call("PATCH", `/drafts/${D3}/elements`, { token: T3(), body: [{ id: "@conditions", settings: { conditions: ["include/general", `exclude/singular/page/${OTHER}`] } }] });
+    const pub3 = await call("POST", `/drafts/${D3}/publish`, { token: P3() });
+    check("výjimka platí po zveřejnění", pub3.status === 200 && !shows(await html(`page_id=${OTHER}`), FOOT3) && shows(await html(`page_id=${PAGE}`), FOOT3), pub3.json);
+    const rb3 = await call("POST", `/pages/${FOOT3}/rollback`, { token: P3() });
+    check("návrat vrátí původní podmínky", rb3.status === 200 && (await helper(`/inspect&post=${FOOT3}`)).meta._elementor_conditions === orig && shows(await html(`page_id=${OTHER}`), FOOT3), rb3.json);
+  }
+
   // ---------- Nová stránka ----------
   console.log("\nNová stránka");
   {
@@ -445,7 +532,7 @@ try {
       check("zveřejnění propojí překlad, základ dostane výchozí jazyk", tp.status === 200 && gbI?.translations?.de === TL && tlI?.lang === "de" && !!gbI?.lang, { gbI, tlI });
       if (withElementor) {
         const FOOT2 = stP2.pages["Test Patička"];
-        check("šablona bez jazyka 400", (await newPage({ title: "x", from: FOOT2 })).status === 400);
+        if (!withPro) check("kopie šablony bez Elementoru Pro 422", (await newPage({ title: "x", from: FOOT2 })).status === 422);
         const ft = await newPage({ title: "Fußzeile", from: FOOT2, lang: "de" });
         const FT = ft.json?.id;
         const ftM = (await helper(`/inspect&post=${FT}`)).meta;

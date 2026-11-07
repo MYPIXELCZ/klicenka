@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.7.0
+ * Version: 0.8.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -13,8 +13,12 @@
  *   define('KLICENKA_UPRAVY_POST_TYPES', 'page,post,elementor_library'); // čárkou oddělené typy obsahu
  *
  * Šablony Elementoru (hlavička, patička, pop-up, sekce, kit) se upravují stejně jako stránky: kopie jako koncept,
- * publikace jen z trackeru, záloha a návrat. Podmínky zobrazení šablon (_elementor_conditions) se nekopírují ani nemění,
- * koncept šablony se proto na webu nikdy neuplatní; náhled ho na stránce vymění jen pro požadavek s podepsaným odkazem.
+ * publikace jen z trackeru, záloha a návrat. Podmínky zobrazení šablon (_elementor_conditions) se nekopírují, koncept šablony
+ * se proto na webu nikdy neuplatní; náhled ho na stránce vymění jen pro požadavek s podepsaným odkazem.
+ *
+ * Podmínky zobrazení (Elementor Pro): koncept šablony si je drží stranou (položka „@conditions“), na web je zapíše až zveřejnění
+ * a návrat je vrátí. Vlastní hlavička pro vybrané stránky = nová šablona jako kopie (POST /pages/new) s konkrétní podmínkou,
+ * ta má v Elementoru přednost před include/general. Náhled konceptu stránky ukáže šablony téže úpravy, které na ni míří.
  *
  * Nová stránka (POST /pages/new): koncept prázdný nebo jako kopie existující; zveřejnění zveřejní koncept, nic nepřepíše,
  * s Polylangem ho propojí jako překlad; návrat ho stáhne do konceptu. Polylang instaluje člověk; jazyky a přiřazení obsahu
@@ -29,7 +33,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.7.0');
+define('KLICENKA_UPRAVY_VERSION', '0.8.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -67,7 +71,7 @@ function klicenka_upravy_max_pdf()
 
 /**
  * Meta, která se nekopírují ani nepřepisují: technické zámky, cache Elementoru, naše vlastní, koš
- * a podmínky zobrazení šablon (kde se hlavička/patička/pop-up ukazuje); ty mění jen člověk v Elementoru.
+ * a podmínky zobrazení šablon (kde se hlavička/patička/pop-up ukazuje); ty mění jen zveřejnění přes „@conditions“.
  */
 function klicenka_upravy_skip_meta($key)
 {
@@ -627,6 +631,100 @@ function klicenka_upravy_lang_info($post)
     return array();
 }
 
+/** Správce podmínek zobrazení Elementoru Pro, bez Pro null. */
+function klicenka_upravy_conditions_manager()
+{
+    if (!class_exists('\\ElementorPro\\Modules\\ThemeBuilder\\Module')) {
+        return null;
+    }
+    return \ElementorPro\Modules\ThemeBuilder\Module::instance()->get_conditions_manager();
+}
+
+/** Podmínky čekající na zveřejnění, null = koncept je nemění. */
+function klicenka_upravy_pending_conditions($id)
+{
+    $list = json_decode((string) get_post_meta($id, '_klicenka_upravy_conditions', true), true);
+    return is_array($list) ? $list : null;
+}
+
+/** Ověří seznam podmínek (např. include/singular/page/123); vrací seznam, nebo chybu. */
+function klicenka_upravy_check_conditions($list)
+{
+    $manager = klicenka_upravy_conditions_manager();
+    if (!$manager) {
+        return klicenka_upravy_error('no_conditions', 'Podmínky zobrazení potřebují Elementor Pro, na webu není.', 422);
+    }
+    if (!is_array($list)) {
+        return klicenka_upravy_error('invalid', '@conditions potřebuje seznam „conditions“.', 400);
+    }
+    $out = array();
+    foreach ($list as $c) {
+        if (!is_string($c) || !preg_match('#^(include|exclude)/[a-z0-9_-]+(/[a-z0-9_-]+)?(/\d+)?$#', $c)) {
+            return klicenka_upravy_error('invalid', 'Neplatná podmínka: ' . (is_string($c) ? substr($c, 0, 60) : '?'), 400);
+        }
+        $parts = explode('/', $c);
+        foreach (array_slice($parts, 1, 2) as $name) {
+            if (!ctype_digit($name) && !$manager->get_condition($name)) {
+                return klicenka_upravy_error('invalid', 'Elementor takovou podmínku nezná: ' . $c, 400);
+            }
+        }
+        $out[] = $c;
+    }
+    return array_values(array_unique($out));
+}
+
+/** Zapíše podmínky šabloně a obnoví cache Elementoru Pro; bez Pro (návrat po jeho vypnutí) jen samotné meta. */
+function klicenka_upravy_apply_conditions($id, $list)
+{
+    $manager = klicenka_upravy_conditions_manager();
+    if ($manager) {
+        $manager->save_conditions($id, array_map(function ($c) {
+            return explode('/', $c);
+        }, $list));
+    } elseif ($list) {
+        update_post_meta($id, '_elementor_conditions', $list);
+    } else {
+        delete_post_meta($id, '_elementor_conditions');
+    }
+    wp_cache_delete($id, 'post_meta');
+    $now = get_post_meta($id, '_elementor_conditions', true);
+    return array_values(is_array($now) ? $now : array()) === array_values($list);
+}
+
+/** Id stránek, na které podmínky konkrétně míří (include/singular/<cokoli>/<id>). */
+function klicenka_upravy_condition_targets($list)
+{
+    $ids = array();
+    foreach ((array) $list as $c) {
+        if (preg_match('#^include/singular/[a-z0-9_-]+/(\d+)$#', (string) $c, $m)) {
+            $ids[] = (int) $m[1];
+        }
+    }
+    return $ids;
+}
+
+/** Šablona, kterou koncept na webu nahrazuje: u kopie originál, u nové ta, ze které vznikla. */
+function klicenka_upravy_template_base($draft_id)
+{
+    $source = (int) get_post_meta($draft_id, '_klicenka_upravy_source', true);
+    $from = (int) get_post_meta($draft_id, '_klicenka_upravy_new', true);
+    return $source === $draft_id && $from > 0 ? $from : $source;
+}
+
+/** Jen pro tento požadavek ukáže koncept šablony místo jejího základu (nic se neukládá). */
+function klicenka_upravy_swap_template($draft, $orig)
+{
+    // Elementor Pro vybírá šablony pro hlavičku, patičku, pop-upy… podle podmínek; tady jen vymění originál za koncept.
+    // Až po Polylangu/WPML (ty tu šablonu přeloží do jazyka stránky), pak teprve výměna za koncept.
+    add_filter('elementor/theme/get_location_templates/template_id', function ($id) use ($draft, $orig) {
+        return (int) $id === $orig ? $draft : $id;
+    }, 999);
+    // Elementor kontroluje stav: koncept se v tomto požadavku tváří jako zveřejněný (jen filtr, nic se neukládá).
+    add_filter('get_post_status', function ($status, $post) use ($draft) {
+        return (int) $post->ID === $draft ? 'publish' : $status;
+    }, 10, 2);
+}
+
 /** U šablony Elementoru: typ (header, footer, popup, section, kit…), podmínky zobrazení a jestli je aktivní kit. */
 function klicenka_upravy_template_info($post)
 {
@@ -881,13 +979,16 @@ function klicenka_upravy_rest_new(WP_REST_Request $request)
             return klicenka_upravy_error('not_found', 'Základní stránka neexistuje.', 404);
         }
     }
-    // Šablona Elementoru jen jako jazyková verze (hlavička, patička…); překládat je umí až Connect Polylang for Elementor.
+    // Šablona Elementoru: jazyková verze (překládat je umí až Connect Polylang for Elementor), nebo kopie s vlastními podmínkami.
     $template = $base && $base->post_type === 'elementor_library';
     if ($template) {
-        if (trim((string) ($b['lang'] ?? '')) === '' || get_post_meta($from, '_elementor_template_type', true) === 'kit') {
-            return klicenka_upravy_error('invalid', 'Ze šablony jde založit jen jazyková verze.', 400);
+        if (get_post_meta($from, '_elementor_template_type', true) === 'kit') {
+            return klicenka_upravy_error('invalid', 'Kit nejde založit jako novou šablonu.', 400);
         }
-        if (function_exists('pll_is_translated_post_type') && !pll_is_translated_post_type('elementor_library')) {
+        if (trim((string) ($b['lang'] ?? '')) === '' && !klicenka_upravy_conditions_manager()) {
+            return klicenka_upravy_error('no_conditions', 'Kopie šablony potřebuje Elementor Pro, na webu není.', 422);
+        }
+        if (trim((string) ($b['lang'] ?? '')) !== '' && function_exists('pll_is_translated_post_type') && !pll_is_translated_post_type('elementor_library')) {
             return klicenka_upravy_error('no_template_translation', 'Překlad šablon potřebuje plugin Connect Polylang for Elementor.', 422);
         }
     }
@@ -976,6 +1077,13 @@ function klicenka_upravy_publish_new($draft, $p)
     list($from, $lang) = array_pad(explode('|', (string) get_post_meta($draft->ID, '_klicenka_upravy_new', true)), 2, '');
     $from = (int) $from;
     $base = $from ? get_post($from) : null;
+    $conditions = klicenka_upravy_pending_conditions($draft->ID);
+    if ($draft->post_type === 'elementor_library' && $lang === '' && !$conditions) {
+        return klicenka_upravy_error('invalid', 'Nová šablona nemá podmínky zobrazení, nikde by se neukázala. Nic se nezveřejnilo.', 422);
+    }
+    if ($conditions !== null && !klicenka_upravy_conditions_manager()) {
+        return klicenka_upravy_error('no_conditions', 'Podmínky zobrazení potřebují Elementor Pro, nic se nezveřejnilo.', 422);
+    }
     if ($lang !== '' && $base && function_exists('pll_get_post') && (int) pll_get_post($from, $lang) > 0 && (int) pll_get_post($from, $lang) !== $draft->ID) {
         return klicenka_upravy_error('conflict', 'Tato jazyková verze už mezitím vznikla, nic se nezveřejnilo.', 409);
     }
@@ -1024,6 +1132,9 @@ function klicenka_upravy_publish_new($draft, $p)
             pll_save_post_translations($tr);
         }
     }
+    if ($conditions !== null && !klicenka_upravy_apply_conditions($draft->ID, $conditions)) {
+        return klicenka_upravy_error('failed', 'Podmínky zobrazení se nepodařilo zapsat, šablona je zveřejněná bez nich.', 500);
+    }
     $css = klicenka_upravy_is_elementor($draft->ID) ? klicenka_upravy_elementor_refresh($draft->ID) : null;
     if ($draft->post_type === 'elementor_library') {
         klicenka_upravy_purge_all();
@@ -1051,6 +1162,10 @@ function klicenka_upravy_rollback_new($post, $created, $p)
     update_post_meta($post->ID, '_klicenka_upravy_req', $p['req']);
     update_post_meta($post->ID, '_klicenka_upravy_new', (string) $created['key']);
     delete_post_meta($post->ID, '_klicenka_upravy_created');
+    // Podmínky z úpravy z webu zmizí, koncept si je drží pro další zveřejnění. Jazykové verzi je dal Connect, těch se to netýká.
+    if (klicenka_upravy_pending_conditions($post->ID) !== null) {
+        klicenka_upravy_apply_conditions($post->ID, array());
+    }
     if ($post->post_type === 'elementor_library') {
         klicenka_upravy_purge_all();
     }
@@ -1081,6 +1196,13 @@ function klicenka_upravy_rest_outline(WP_REST_Request $request)
         if ($editor !== 'elementor') {
             $out['new_page']['content'] = $draft->post_content;
         }
+    }
+    if ($draft->post_type === 'elementor_library') {
+        // Kopie vlastní podmínky nemá: platí ty z originálu, dokud koncept nedostane nové.
+        $pending = klicenka_upravy_pending_conditions($draft->ID);
+        $live = get_post_meta($out['original'], '_elementor_conditions', true);
+        $out['conditions'] = $pending ?? (is_array($live) ? array_values($live) : array());
+        $out['conditions_changed'] = $pending !== null;
     }
     $page = get_post_meta($draft->ID, '_elementor_page_settings', true);
     if (in_array('@page', $ids, true)) {
@@ -1212,6 +1334,21 @@ function klicenka_upravy_rest_elements(WP_REST_Request $request)
             return klicenka_upravy_error('invalid', "Položka $i: " . $s->get_error_message(), 400);
         }
         $clean[] = array('id' => (string) $c['id'], 'settings' => $s);
+    }
+    // „@conditions“ = kde se šablona ukazuje; celý nový seznam, na web ho zapíše až zveřejnění.
+    foreach ($clean as $k => $c) {
+        if ($c['id'] !== '@conditions') {
+            continue;
+        }
+        if ($draft->post_type !== 'elementor_library' || get_post_meta($draft->ID, '_elementor_template_type', true) === 'kit') {
+            return klicenka_upravy_error('invalid', '@conditions jde jen u hlavičky, patičky, pop-upu a podobných šablon.', 422);
+        }
+        $list = klicenka_upravy_check_conditions($c['settings']['conditions'] ?? null);
+        if (is_wp_error($list)) {
+            return $list;
+        }
+        update_post_meta($draft->ID, '_klicenka_upravy_conditions', wp_json_encode($list));
+        unset($clean[$k]);
     }
     // „@post“ = název, adresa, výtah a obsah, jen u konceptu nové stránky (u kopie by zveřejnění přepsalo jen obsah a meta).
     foreach ($clean as $k => $c) {
@@ -1410,6 +1547,17 @@ function klicenka_upravy_rest_preview(WP_REST_Request $request)
         $path = '/' . ltrim((string) $request->get_param('path'), '/');
         $path = preg_match('#^/[A-Za-z0-9/_.%-]*$#', $path) ? $path : '/';
         $base = home_url($path);
+        // Šablona s vlastními podmínkami: náhled na stránce, pro kterou je, ne na úvodní.
+        $target = klicenka_upravy_condition_targets(klicenka_upravy_pending_conditions($draft->ID))[0] ?? 0;
+        if ($path === '/' && $target && get_post($target)) {
+            if (get_post_status($target) === 'draft') {
+                $key = get_post_type($target) === 'page' ? 'page_id' : 'p';
+                $param = $exp . '.' . klicenka_upravy_preview_sig($target, $exp);
+                klicenka_upravy_log('preview-link', klicenka_upravy_payload(), array('draft' => $draft->ID));
+                return rest_ensure_response(array('url' => add_query_arg(array($key => $target, 'klicenka_nahled' => $param), home_url('/')), 'expires' => gmdate('c', $exp)));
+            }
+            $base = get_permalink($target);
+        }
         // Šablona v jiném jazyce (Polylang): náhled na domovské stránce toho jazyka, pokud cesta není zadaná.
         $src = (int) get_post_meta($draft->ID, '_klicenka_upravy_source', true);
         if ($path === '/' && $src && function_exists('pll_get_post_language') && function_exists('pll_home_url')) {
@@ -1471,6 +1619,31 @@ add_filter('posts_results', function ($posts, $q) {
     return $posts;
 }, 10, 2);
 
+// Náhled konceptu stránky: šablony téže úpravy s podmínkou na tuto stránku se ukážou rovnou s ní.
+add_action('init', function () {
+    $page = klicenka_upravy_preview_id();
+    if (!$page) {
+        return;
+    }
+    $ids = array($page, (int) get_post_meta($page, '_klicenka_upravy_source', true));
+    $templates = get_posts(array(
+        'post_type'   => 'elementor_library',
+        'post_status' => 'draft',
+        'numberposts' => 50,
+        'fields'      => 'ids',
+        'lang'        => '',
+        'meta_query'  => array(
+            array('key' => '_klicenka_upravy_req', 'value' => (string) get_post_meta($page, '_klicenka_upravy_req', true)),
+            array('key' => '_klicenka_upravy_conditions', 'compare' => 'EXISTS'),
+        ),
+    ));
+    foreach ($templates as $t) {
+        if (array_intersect($ids, klicenka_upravy_condition_targets(klicenka_upravy_pending_conditions($t)))) {
+            klicenka_upravy_swap_template((int) $t, klicenka_upravy_template_base((int) $t));
+        }
+    }
+});
+
 /** Platný náhled šablony (klicenka_sablona) → [id konceptu, id originálu], jinak null. */
 function klicenka_upravy_preview_template()
 {
@@ -1490,9 +1663,8 @@ function klicenka_upravy_preview_template()
     $post = get_post($id);
     $source = $post ? (int) get_post_meta($id, '_klicenka_upravy_source', true) : 0;
     if ($post && $post->post_status === 'draft' && $post->post_type === 'elementor_library' && $source > 0) {
-        // Nová jazyková verze je sama svým zdrojem; na stránce se v náhledu mění šablona, ze které vznikla.
-        $from = (int) get_post_meta($id, '_klicenka_upravy_new', true);
-        $res = array($id, $source === $id && $from > 0 ? $from : $source);
+        // Nová šablona je sama svým zdrojem; na stránce se v náhledu mění ta, ze které vznikla.
+        $res = array($id, klicenka_upravy_template_base($id));
     }
     return $res;
 }
@@ -1503,15 +1675,7 @@ add_action('init', function () {
         return;
     }
     list($draft, $orig) = $t;
-    // Elementor Pro vybírá šablony pro hlavičku, patičku, pop-upy… podle podmínek; tady jen vymění originál za koncept.
-    // Až po Polylangu/WPML (ty tu šablonu přeloží do jazyka stránky), pak teprve výměna za koncept.
-    add_filter('elementor/theme/get_location_templates/template_id', function ($id) use ($draft, $orig) {
-        return (int) $id === $orig ? $draft : $id;
-    }, 999);
-    // Kdyby Elementor kontroloval stav: koncept se v tomto požadavku tváří jako zveřejněný (jen filtr, nic se neukládá).
-    add_filter('get_post_status', function ($status, $post) use ($draft) {
-        return (int) $post->ID === $draft ? 'publish' : $status;
-    }, 10, 2);
+    klicenka_upravy_swap_template($draft, $orig);
     // Kit (globální barvy, písma): Elementor bere jen zveřejněný kit, proto se CSS konceptu přidá navrch.
     // Jeho pravidla platí pro třídu elementor-kit-<koncept>, kterou dostane body, a načtou se až po originálu.
     if ((int) get_option('elementor_active_kit') === $orig) {
@@ -1628,8 +1792,16 @@ function klicenka_upravy_rest_publish(WP_REST_Request $request)
     }
 
     // Záloha: vlastní kopie (posledních 3) + revize WordPressu.
+    $conditions = klicenka_upravy_pending_conditions($draft->ID);
+    if ($conditions !== null && !klicenka_upravy_conditions_manager()) {
+        return klicenka_upravy_error('no_conditions', 'Podmínky zobrazení potřebují Elementor Pro, nic se nezveřejnilo.', 422);
+    }
     $backups = klicenka_upravy_backups($orig->ID);
     array_unshift($backups, array('time' => gmdate('c'), 'req' => $p['req'], 'draft' => $draft->ID, 'who' => $p['act']['email'] ?? null, 'snapshot' => klicenka_upravy_snapshot($orig)));
+    if ($conditions !== null) {
+        $live = get_post_meta($orig->ID, '_elementor_conditions', true);
+        $backups[0]['conditions'] = is_array($live) ? array_values($live) : array();
+    }
     if (!klicenka_upravy_store_backups($orig->ID, array_slice($backups, 0, KLICENKA_UPRAVY_BACKUPS))) {
         return klicenka_upravy_error('failed', 'Zálohu originálu se nepodařilo uložit, nic se nezměnilo.', 500);
     }
@@ -1641,6 +1813,9 @@ function klicenka_upravy_rest_publish(WP_REST_Request $request)
     $res = klicenka_upravy_apply($orig->ID, $snap);
     if (is_wp_error($res)) {
         return klicenka_upravy_error('failed', 'Publikace selhala, záloha je uložená.', 500);
+    }
+    if ($conditions !== null && !klicenka_upravy_apply_conditions($orig->ID, $conditions)) {
+        return klicenka_upravy_error('failed', 'Podmínky zobrazení se nepodařilo zapsat, obsah je zveřejněný a záloha uložená.', 500);
     }
     // Obrázky nahrané ke konceptu patří od teď originálu.
     foreach (get_children(array('post_parent' => $draft->ID, 'post_type' => 'attachment', 'fields' => 'ids')) as $att) {
@@ -1716,6 +1891,9 @@ function klicenka_upravy_rest_rollback(WP_REST_Request $request)
         return klicenka_upravy_error('failed', 'Obnova selhala.', 500);
     }
     klicenka_upravy_store_backups($orig->ID, $backups);
+    if (isset($b['conditions'])) {
+        klicenka_upravy_apply_conditions($orig->ID, $b['conditions']);
+    }
     $css = klicenka_upravy_is_elementor($orig->ID) ? klicenka_upravy_elementor_refresh($orig->ID) : null;
     if ($orig->post_type === 'elementor_library') {
         klicenka_upravy_purge_all();
@@ -1733,7 +1911,7 @@ function klicenka_upravy_rest_status()
         'klicenka'  => defined('KLICENKA_PLUGIN_VERSION') ? KLICENKA_PLUGIN_VERSION : null,
         'elementor' => defined('ELEMENTOR_VERSION'),
         // Spouštěč podle toho pozná, co web umí: nové stránky a jazyky Polylangu.
-        'features'  => array('new-pages', 'languages-on-publish', 'insert-elements'),
+        'features'  => array_merge(array('new-pages', 'languages-on-publish', 'insert-elements'), klicenka_upravy_conditions_manager() ? array('template-conditions') : array()),
         'languages' => function_exists('pll_languages_list') ? array_values((array) pll_languages_list()) : null,
         // Connect Polylang for Elementor: překlad šablon a widget polylang-language-switcher.
         'connect'   => defined('CPEL_PLUGIN_VERSION'),

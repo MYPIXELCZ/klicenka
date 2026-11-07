@@ -145,6 +145,13 @@ add_action('rest_api_init', function () {
             'attachments' => $post ? array_values(get_children(array('post_parent' => $id, 'post_type' => 'attachment', 'fields' => 'ids'))) : array(),
         );
     }));
+    // Podmínky Elementoru Pro: POST obnoví cache (fixture je zapisuje přímo do meta), GET ji vrátí.
+    register_rest_route('kut/v1', '/regen', array('methods' => array('GET', 'POST'), 'permission_callback' => '__return_true', 'callback' => function (WP_REST_Request $r) {
+        if ($r->get_method() === 'POST') {
+            \ElementorPro\Modules\ThemeBuilder\Module::instance()->get_conditions_manager()->get_cache()->regenerate();
+        }
+        return array('conditions' => get_option('elementor_pro_theme_builder_conditions'));
+    }));
     register_rest_route('kut/v1', '/state', array('methods' => 'GET', 'permission_callback' => '__return_true', 'callback' => function () {
         $u = get_user_by('login', 'claude-upravy');
         $role = get_role('claude_upravy');
