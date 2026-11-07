@@ -505,6 +505,34 @@ try {
     const B = blank.json?.id;
     check("prázdná stránka bez základu", blank.status === 200 && (await helper(`/inspect&post=${B}`)).post.content === "");
     await call("POST", `/drafts/${B}/discard`, { token: PUB(B) });
+
+    // Odkazy v náhledu mezi stránkami téže úpravy.
+    {
+      const TL = (post) => sign({ req: "r22", ...(post ? { post } : {}) });
+      const mk = async (title, slug) => (await call("POST", "/pages/new", { token: TL(), body: { title, slug } })).json.id;
+      const LA = await mk("Odkazy A", "odkazy-a"), LB = await mk("Odkazy B", "odkazy-b");
+      const LC = (await call("POST", `/pages/${CIZI}/duplicate`, { token: TL(CIZI) })).json?.id;
+      const cizi = (await helper("/state")).pages["Cizí stránka"] === CIZI ? `/?page_id=${CIZI}` : "";
+      await call("PATCH", `/drafts/${LA}/elements`, { token: TL(LA), body: [{ id: "@post", settings: { content: `<p><a href="${WP}/odkazy-b/#kotva">nova</a> <a href="/odkazy-b">relativni</a> <a href="${WP}${cizi}">kopie</a> <a href="${WP}/?p=${CIZI}">podle-id</a> <a href="${WP}/jina-stranka/">jina</a></p>` } }] });
+      await call("PATCH", `/drafts/${LB}/elements`, { token: TL(LB), body: [{ id: "@post", settings: { content: "<p>Obsah stránky B</p>" } }] });
+      const pl = await call("GET", `/drafts/${LA}/preview-link`, { token: TL(LA) });
+      const h = await (await fetch(pl.json.url)).text();
+      const hrefOf = (t) => new RegExp(`<a[^>]*href="([^"]*)"[^>]*>${t}<`).exec(h)?.[1]?.replace(/&#0?38;|&amp;/g, "&");
+      const nova = hrefOf("nova");
+      check("odkaz na novou stránku vede na její náhled i s kotvou", nova?.includes(`page_id=${LB}`) && nova.includes("klicenka_nahled=") && nova.endsWith("#kotva"), nova);
+      check("relativní odkaz taky", hrefOf("relativni")?.includes(`page_id=${LB}`), hrefOf("relativni"));
+      check("odkaz na originál vede na náhled jeho konceptu", hrefOf("kopie")?.includes(`page_id=${LC}`) && hrefOf("podle-id")?.includes(`page_id=${LC}`), [hrefOf("kopie"), hrefOf("podle-id")]);
+      check("cizí odkaz zůstává", hrefOf("jina") === `${WP}/jina-stranka/`, hrefOf("jina"));
+      const exp = (u) => new URL(u, WP).searchParams.get("klicenka_nahled")?.split(".")[0];
+      check("platnost nepřesáhne výchozí náhled", exp(nova) === exp(pl.json.url), [exp(nova), exp(pl.json.url)]);
+      check("otevřený odkaz ukáže stránku B", (await (await fetch(nova)).text()).includes("Obsah stránky B"));
+      check("živá stránka bez náhledu se nepřepisuje", !(await (await fetch(`${WP}/?page_id=${CIZI}`)).text()).includes("klicenka_nahled"));
+      const before = (await call("POST", "/pages/new", { token: sign({ req: "r23" }), body: { title: "Cizí úprava", slug: "cizi-uprava" } })).json.id;
+      await call("PATCH", `/drafts/${LA}/elements`, { token: TL(LA), body: [{ id: "@post", settings: { content: `<p><a href="${WP}/cizi-uprava/">cizi</a></p>` } }] });
+      check("stránka jiné úpravy se nepřepíše", !(await (await fetch(pl.json.url)).text()).includes(`page_id=${before}`));
+      for (const [id, tok] of [[LA, LA], [LB, LB], [LC, CIZI]]) await call("POST", `/drafts/${id}/discard`, { token: sign({ scope: "publish", req: "r22", post: tok }, { ttl: 60 }) });
+      await call("POST", `/drafts/${before}/discard`, { token: sign({ scope: "publish", req: "r23", post: before }, { ttl: 60 }) });
+    }
     if (withElementor) {
       const ne = await newPage({ title: "Elementor kopie", from: EL });
       const NE = ne.json?.id;

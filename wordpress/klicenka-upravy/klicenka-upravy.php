@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.8.0
+ * Version: 0.9.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -19,6 +19,7 @@
  * Podmínky zobrazení (Elementor Pro): koncept šablony si je drží stranou (položka „@conditions“), na web je zapíše až zveřejnění
  * a návrat je vrátí. Vlastní hlavička pro vybrané stránky = nová šablona jako kopie (POST /pages/new) s konkrétní podmínkou,
  * ta má v Elementoru přednost před include/general. Náhled konceptu stránky ukáže šablony téže úpravy, které na ni míří.
+ * Odkazy v náhledu na stránky téže úpravy vedou na jejich náhledy, takže se prochází jako hotový web.
  *
  * Nová stránka (POST /pages/new): koncept prázdný nebo jako kopie existující; zveřejnění zveřejní koncept, nic nepřepíše,
  * s Polylangem ho propojí jako překlad; návrat ho stáhne do konceptu. Polylang instaluje člověk; jazyky a přiřazení obsahu
@@ -33,7 +34,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.8.0');
+define('KLICENKA_UPRAVY_VERSION', '0.9.0');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -1643,6 +1644,65 @@ add_action('init', function () {
         }
     }
 });
+
+/** Klíč pro porovnání odkazů: bez kotvy, schématu a koncového lomítka. */
+function klicenka_upravy_link_key($url)
+{
+    $url = html_entity_decode((string) $url, ENT_QUOTES);
+    if (strpos($url, '/') === 0 && strpos($url, '//') !== 0) {
+        $url = home_url($url);
+    }
+    return strtolower(untrailingslashit(preg_replace(array('/#.*$/', '#^(https?:)?//#i'), '', $url)));
+}
+
+/** Adresy stránek téže úpravy → jejich podepsaný náhled. Platnost nových odkazů nepřesáhne ten, ze kterého se přišlo. */
+function klicenka_upravy_preview_links($req, $exp)
+{
+    $map = array();
+    $drafts = get_posts(array('post_type' => array('page', 'post'), 'post_status' => 'draft', 'numberposts' => 100, 'lang' => '', 'meta_key' => '_klicenka_upravy_req', 'meta_value' => $req));
+    foreach ($drafts as $d) {
+        $source = (int) get_post_meta($d->ID, '_klicenka_upravy_source', true);
+        if ($source <= 0) {
+            continue;
+        }
+        $urls = array(add_query_arg('p', $source, home_url('/')), add_query_arg('page_id', $source, home_url('/')));
+        if ($source !== $d->ID) {
+            $urls[] = get_permalink($source);
+        } else {
+            // Nová stránka adresu ještě nemá: ta, kterou dostane zveřejněním.
+            $lang = (string) (explode('|', (string) get_post_meta($d->ID, '_klicenka_upravy_new', true))[1] ?? '');
+            $urls[] = home_url('/' . ($lang !== '' ? $lang . '/' : '') . ($d->post_type === 'page' ? get_page_uri($d) : $d->post_name));
+        }
+        $preview = add_query_arg(array($d->post_type === 'page' ? 'page_id' : 'p' => $d->ID, 'klicenka_nahled' => $exp . '.' . klicenka_upravy_preview_sig($d->ID, $exp)), home_url('/'));
+        foreach ($urls as $u) {
+            $map[klicenka_upravy_link_key($u)] = $preview;
+        }
+    }
+    return $map;
+}
+
+add_action('template_redirect', function () {
+    $template = klicenka_upravy_preview_template();
+    $draft = klicenka_upravy_preview_id() ?: ($template ? $template[0] : 0);
+    if (!$draft) {
+        return;
+    }
+    $exp = (int) wp_unslash($_GET['klicenka_nahled']);
+    $map = klicenka_upravy_preview_links((string) get_post_meta($draft, '_klicenka_upravy_req', true), $exp);
+    if (!$map) {
+        return;
+    }
+    ob_start(function ($html) use ($map) {
+        return preg_replace_callback('#(<a\b[^>]*?\shref=)(["\'])(.*?)\2#is', function ($m) use ($map) {
+            $key = klicenka_upravy_link_key($m[3]);
+            if (!isset($map[$key])) {
+                return $m[0];
+            }
+            $anchor = strpos($m[3], '#') !== false ? substr($m[3], strpos($m[3], '#')) : '';
+            return $m[1] . $m[2] . esc_url($map[$key]) . $anchor . $m[2];
+        }, $html);
+    });
+}, 0);
 
 /** Platný náhled šablony (klicenka_sablona) → [id konceptu, id originálu], jinak null. */
 function klicenka_upravy_preview_template()
