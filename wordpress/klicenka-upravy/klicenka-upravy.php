@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – úpravy Claudem
  * Description: Úzké REST API, přes které spouštěč úprav (Claude Code) mění jen kopii stránky (koncept). Publikovat jde jen tokenem z trackeru po kliknutí člověka.
- * Version: 0.9.3
+ * Version: 0.9.4
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -34,7 +34,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_UPRAVY_VERSION', '0.9.3');
+define('KLICENKA_UPRAVY_VERSION', '0.9.4');
 define('KLICENKA_UPRAVY_NS', 'klicenka-upravy/v1');
 define('KLICENKA_UPRAVY_TYP', 'klicenka-upravy+jwt');
 define('KLICENKA_UPRAVY_USER', 'claude-upravy');
@@ -1657,12 +1657,54 @@ add_filter('posts_results', function ($posts, $q) {
     return $posts;
 }, 10, 2);
 
+/**
+ * Koncept je jiné id než originál, takže šablona s podmínkou na originál (vlastní hlavička úvodní stránky) by se v náhledu
+ * neukázala a místo ní by přišla společná. Tady ji vrátí, koncept šablony téže úpravy má přednost (vyšší priorita filtru).
+ */
+function klicenka_upravy_preview_source_templates($page)
+{
+    $source = (int) get_post_meta($page, '_klicenka_upravy_source', true);
+    if (!$source || $source === (int) $page) {
+        return;
+    }
+    $ids = array($source);
+    $lang = function_exists('pll_get_post_language') ? pll_get_post_language($source) : '';
+    if ($lang && function_exists('pll_get_post_translations')) {
+        $ids = array_map('intval', array_values(pll_get_post_translations($source))) ?: $ids;
+    }
+    $found = array();
+    foreach (array('header', 'footer') as $type) {
+        $templates = get_posts(array(
+            'post_type'   => 'elementor_library',
+            'post_status' => 'publish',
+            'numberposts' => 200,
+            'fields'      => 'ids',
+            'lang'        => '',
+            'meta_key'    => '_elementor_template_type',
+            'meta_value'  => $type,
+        ));
+        foreach ($templates as $t) {
+            if (array_intersect($ids, klicenka_upravy_condition_targets(get_post_meta($t, '_elementor_conditions', true)))) {
+                $translated = $lang && function_exists('pll_get_post') ? (int) pll_get_post($t, $lang) : 0;
+                $found[$type] = $translated ?: (int) $t;
+                break;
+            }
+        }
+    }
+    if ($found) {
+        add_filter('elementor/theme/get_location_templates/template_id', function ($id, $location = '') use ($found) {
+            return isset($found[$location]) ? $found[$location] : $id;
+        }, 998, 2);
+    }
+}
+
 // Náhled konceptu stránky: šablony téže úpravy s podmínkou na tuto stránku se ukážou rovnou s ní.
 add_action('init', function () {
     $page = klicenka_upravy_preview_id();
     if (!$page) {
         return;
     }
+    klicenka_upravy_preview_source_templates($page);
     $ids = array($page, (int) get_post_meta($page, '_klicenka_upravy_source', true));
     $templates = get_posts(array(
         'post_type'   => 'elementor_library',

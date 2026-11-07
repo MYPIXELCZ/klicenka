@@ -460,6 +460,18 @@ try {
     check("živá stránka vytiskne pop-up z odkazu", live.includes("English popup"), live.slice(-800));
     check("nová stránka má vlastní patičku", live.includes("English footer") && !shows(live, FOOT3), live.slice(-1500));
     check("ostatní stránky mají společnou", shows(await html(`page_id=${PAGE}`), FOOT3) && !(await html(`page_id=${OTHER}`)).includes("English footer"));
+    // Koncept existující stránky je jiné id: šablona s podmínkou na originál se v jeho náhledu ukázat musí.
+    const dupNP = await call("POST", `/pages/${NP}/duplicate`, { token: TN(NP) });
+    const DNP = dupNP.json?.draftId ?? dupNP.json?.id ?? dupNP.json?.draft?.id;
+    const pvNP = await call("GET", `/drafts/${DNP}/preview-link`, { token: TN(NP) });
+    const hNP = await (await fetch(pvNP.json.url)).text();
+    check("náhled konceptu ukáže šablonu s podmínkou na originál", hNP.includes("English footer") && !shows(hNP, FOOT3), hNP.slice(-1500));
+    const dupP = await call("POST", `/pages/${PAGE}/duplicate`, { token: TN(PAGE) });
+    const DP = dupP.json?.draftId ?? dupP.json?.id ?? dupP.json?.draft?.id;
+    const pvP = await call("GET", `/drafts/${DP}/preview-link`, { token: TN(PAGE) });
+    check("koncept stránky bez vlastní šablony má společnou", shows(await (await fetch(pvP.json.url)).text(), FOOT3));
+    await call("POST", `/drafts/${DNP}/discard`, { token: PUB(NP) });
+    await call("POST", `/drafts/${DP}/discard`, { token: PUB(PAGE) });
     // Kopie kopie míří na stránku se společnou patičkou: náhled ji musí ukázat, i když na té stránce není její základ.
     const t2 = await call("POST", "/pages/new", { token: TN(), body: { title: "Patička 2", from: NF } });
     const NF2 = t2.json?.id;
