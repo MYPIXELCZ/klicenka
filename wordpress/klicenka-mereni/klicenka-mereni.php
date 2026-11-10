@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka – měření návštěvnosti
  * Description: Vloží do hlavičky webu měřicí skript Project Trackeru (MYPIXEL), bez cookies a bez lišty se souhlasem. Nic jiného nedělá.
- * Version: 0.1.2
+ * Version: 0.1.3
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -26,7 +26,7 @@ if (defined('KLICENKA_MERENI_VERSION')) {
     return;
 }
 
-define('KLICENKA_MERENI_VERSION', '0.1.2');
+define('KLICENKA_MERENI_VERSION', '0.1.3');
 
 function klicenka_mereni_enabled()
 {
@@ -116,15 +116,23 @@ function klicenka_mereni_purge_all()
         error_log('[klicenka-mereni] purge: ' . get_class($e));
     }
 }
-add_action('init', function () {
+/*
+ * Čistí se až při běžném zobrazení stránky návštěvníkovi, ne v cronu, AJAXu ani REST: samoaktualizace
+ * běží právě tam a odpověď na takový požadavek neprojde přes CDN (Hostinger), takže pokyn
+ * X-LiteSpeed-Purge by CDN nikdy neviděla a dál by rozdávala stránky bez značky (0.1.3).
+ */
+add_action('template_redirect', function () {
     if (defined('KLICENKA_TRAFFIC') && !KLICENKA_TRAFFIC) {
+        return;
+    }
+    if (is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('REST_REQUEST') && REST_REQUEST)) {
         return;
     }
     if (get_option('klicenka_mereni_purged') !== KLICENKA_MERENI_VERSION) {
         update_option('klicenka_mereni_purged', KLICENKA_MERENI_VERSION, false);
         klicenka_mereni_purge_all();
     }
-}, 20);
+}, 1);
 
 add_action('wp_head', function () {
     if (!klicenka_mereni_enabled() || klicenka_mereni_skip()) {
