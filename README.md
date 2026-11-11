@@ -31,6 +31,14 @@ vypisují veřejné údaje:
   s CSP mu přidají nonce; přísná CSP bez nich musí povolit `script-src` a `connect-src` pro tracker.
   Vypnutí: `define('KLICENKA_TRAFFIC', false);`.
 
+Od 1.8.0 smí aktualizace přidat `klicenka-beta.php` (zkušební režim pro zkoušky formulářů z bety trackeru), ale jen
+na výslovný pokyn (claim `install`), sám od sebe nikdy. Bez platného tokenu (`X-Klicenka-Test`, typ `klicenka-beta+jwt`,
+scope `test`, nejvýš 120 s, jednorázový) nedělá nic. S ním žádný e-mail neodejde (komu a s jakým předmětem by šel, vrátí
+v hlavičce `X-Klicenka-Beta`), od začátku zpracování formuláře nic nejde ven ani se neodkládá na později (Action
+Scheduler, WP-Cron), Elementor Pro spustí jen e-mail a přesměrování, WPForms jen upozornění e-mailem, platební formuláře
+a weby, kde poštu nejde spolehlivě zadržet, odmítne (409). Test: `WPFORMS_DIR=… node wordpress/klicenka-beta/test/run.mjs`
+(WP Playground, i `PHP_VERSION=7.4`; s `ELEMENTOR_DIR` + `ELEMENTOR_PRO_DIR` i Elementor Pro, potřebuje Elementor ≥ 3.35).
+
 Nový soubor přidá až samoaktualizace, která už běží s jeho verzí `klicenka.php` (web na 1.6.0 tedy dostane
 `klicenka-mereni.php` druhým během po aktualizaci na 1.7.0). V balíčku pluginu (`inc/`) je načte `klicenka.php`.
 
@@ -43,7 +51,7 @@ Balíček npm a pluginy pro WordPress mají **vlastní, nezávislá čísla verz
 - **WordPress mu-plugin** (`wordpress/klicenka/klicenka.php`) – verze v hlavičce `Version:`
   a v `KLICENKA_PLUGIN_VERSION`, tagy `wp-X.Y.Z` (např. `wp-1.4.1`).
 - **Doplňky pro WordPress** (`klicenka-stav`, `klicenka-upravy`, `klicenka-udrzba`, `klicenka-overeni`,
-  `klicenka-mereni`) – každý má verzi
+  `klicenka-mereni`, `klicenka-beta`) – každý má verzi
   ve své hlavičce, zatím bez tagů.
 
 ## Údržba WordPressu a záloha mimo hosting (`klicenka-udrzba` 0.3.0)

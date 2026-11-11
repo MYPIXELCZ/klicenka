@@ -17,6 +17,7 @@ const STAV = fs.readFileSync(path.join(wp, "klicenka-stav/klicenka-stav.php"), "
 const UDRZBA = fs.readFileSync(path.join(wp, "klicenka-udrzba/klicenka-udrzba.php"), "utf8");
 const OVERENI = fs.readFileSync(path.join(wp, "klicenka-overeni/klicenka-overeni.php"), "utf8");
 const MERENI = fs.readFileSync(path.join(wp, "klicenka-mereni/klicenka-mereni.php"), "utf8");
+const BETA = fs.readFileSync(path.join(wp, "klicenka-beta/klicenka-beta.php"), "utf8");
 const GSC_TOKEN = "TestZnacka_1234-abcdEF";
 const NEW_VERSION = NEW.match(/Version:\s*([\d.]+)/)[1];
 // „Stará“ kopie = nová s jinou verzí v hlavičce (stará 1.2 by se sama aktualizovat neuměla).
@@ -29,7 +30,7 @@ const keep = process.argv.includes("--keep");
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const otherKey = crypto.generateKeyPairSync("ed25519").privateKey;
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "test1", alg: "EdDSA", use: "sig" };
-let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA, "klicenka-overeni.php": OVERENI, "klicenka-mereni.php": MERENI };
+let files = { "klicenka.php": NEW, "klicenka-upravy.php": UPRAVY, "klicenka-stav.php": STAV, "klicenka-udrzba.php": UDRZBA, "klicenka-overeni.php": OVERENI, "klicenka-mereni.php": MERENI, "klicenka-beta.php": BETA };
 const gscHosts = [];
 let mode = "ok"; // ok | badsig | stale | badhash | syntax
 const sha = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
@@ -118,6 +119,7 @@ try {
   r = await update(token());
   check("platná aktualizace: klicenka.php i klicenka-stav.php", r.json?.ok && r.json.updated.includes("klicenka.php") && r.json.updated.includes("klicenka-stav.php") && read("klicenka.php") === NEW && read("klicenka-stav.php") === STAV, r.json);
   check("klicenka-upravy.php bez pokynu nepřibyl", read("klicenka-upravy.php") === null);
+  check("klicenka-beta.php bez pokynu nepřibyl", read("klicenka-beta.php") === null && (await status()).beta === false);
   check("klicenka-udrzba.php bez pokynu nepřibyl", read("klicenka-udrzba.php") === null && (await status()).udrzba === false);
   check("klicenka-overeni.php přibyl sám (neškodný)", r.json.updated.includes("klicenka-overeni.php") && read("klicenka-overeni.php") === OVERENI && (await status()).overeni === true, r.json);
   const home = await (await fetch(`${WP}/?_=${Date.now()}`)).text();
@@ -143,6 +145,9 @@ try {
   r = await update(token({ install: ["klicenka-udrzba.php"] }));
   check("install přidá klicenka-udrzba.php", r.json?.ok && read("klicenka-udrzba.php") === UDRZBA && (await status()).udrzba === true, r.json);
   check("web s klicenka-udrzba běží (pasivní)", (await fetch(`${WP}/`)).status === 200);
+  r = await update(token({ install: ["klicenka-beta.php"] }));
+  check("install přidá klicenka-beta.php", r.json?.ok && read("klicenka-beta.php") === BETA && (await status()).beta === true, r.json);
+  check("web s klicenka-beta běží (bez tokenu nedělá nic)", (await fetch(`${WP}/`)).status === 200);
   const pas = await fetch(`${WP}/?rest_route=/klicenka-udrzba/v1/zalohy`);
   check("údržba bez tokenu 401", pas.status === 401);
   const t = token();

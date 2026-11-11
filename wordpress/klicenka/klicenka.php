@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Klíčenka
  * Description: Přihlášení na klik z Project Trackeru (MYPIXEL). Běžné přihlášení heslem zůstává beze změny.
- * Version: 1.7.0
+ * Version: 1.8.0
  * Requires PHP: 7.4
  * License: MIT
  *
@@ -28,13 +28,17 @@
  *
  * Od 1.7.0 přidá sama i klicenka-mereni.php (měřicí skript trackeru <issuer>/n.js bez cookies; nepřihlášeným
  * a bez práva upravovat). Vypnout: define('KLICENKA_TRAFFIC', false); pak se ani nepřidá.
+ *
+ * Od 1.8.0 smí aktualizace přidat i klicenka-beta.php (zkušební režim pro zkoušky formulářů z trackeru; bez
+ * platného podpisu nedělá nic). Přidá se jen na výslovný pokyn (claim "install"), sám od sebe nikdy. Web na starší
+ * verzi ho dostane až druhou aktualizací: první nahradí klicenka.php, teprve nová verze soubor zná.
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-define('KLICENKA_PLUGIN_VERSION', '1.7.0');
+define('KLICENKA_PLUGIN_VERSION', '1.8.0');
 
 function klicenka_config()
 {
@@ -304,6 +308,8 @@ function klicenka_status()
     $out['overeni'] = file_exists(__DIR__ . '/klicenka-overeni.php');
     // Od 1.7.0: měření návštěvnosti.
     $out['mereni'] = file_exists(__DIR__ . '/klicenka-mereni.php');
+    // Od 1.8.0: zkušební režim bety (zkoušky formulářů).
+    $out['beta'] = file_exists(__DIR__ . '/klicenka-beta.php');
     $out['autoUpdate'] = !(defined('KLICENKA_AUTO_UPDATE') && !KLICENKA_AUTO_UPDATE);
     // The identifier and environment are the token's audience — public, and the
     // tracker reads them when the site is added.
@@ -323,7 +329,7 @@ add_action('wp_ajax_klicenka_status', 'klicenka_status');
 /** Soubory, které smí aktualizace měnit (jen v adresáři tohoto mu-pluginu). */
 function klicenka_update_allowed()
 {
-    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php', 'klicenka-udrzba.php', 'klicenka-overeni.php', 'klicenka-mereni.php');
+    return array('klicenka.php', 'klicenka-upravy.php', 'klicenka-stav.php', 'klicenka-udrzba.php', 'klicenka-overeni.php', 'klicenka-mereni.php', 'klicenka-beta.php');
 }
 
 /**
@@ -490,4 +496,8 @@ if (file_exists(__DIR__ . '/klicenka-overeni.php')) {
 // Měření návštěvnosti (1.7.0), stejně tak.
 if (file_exists(__DIR__ . '/klicenka-mereni.php')) {
     require_once __DIR__ . '/klicenka-mereni.php';
+}
+// Zkušební režim bety (1.8.0). V mu-plugins se načte sám (dřív než tenhle soubor), v balíčku pluginu až tady.
+if (file_exists(__DIR__ . '/klicenka-beta.php')) {
+    require_once __DIR__ . '/klicenka-beta.php';
 }
