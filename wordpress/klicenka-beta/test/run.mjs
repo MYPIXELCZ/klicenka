@@ -35,16 +35,21 @@ const AUD = "example-wordpress@local";
 const WP = `http://127.0.0.1:${WP_PORT}`;
 const keep = process.argv.includes("--keep");
 
-const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+// SIGNING_JWK = soukromý Ed25519 JWK (jako KLICENKA_SIGNING_KEY v trackeru): web pak přijme i tokeny z trackeru.
+const given = process.env.SIGNING_JWK ? JSON.parse(process.env.SIGNING_JWK) : null;
+const { publicKey, privateKey } = given
+  ? { privateKey: crypto.createPrivateKey({ key: given, format: "jwk" }), publicKey: crypto.createPublicKey({ key: { kty: given.kty, crv: given.crv, x: given.x }, format: "jwk" }) }
+  : crypto.generateKeyPairSync("ed25519");
 const otherKey = crypto.generateKeyPairSync("ed25519").privateKey;
-const jwk = { ...publicKey.export({ format: "jwk" }), kid: "test1", alg: "EdDSA", use: "sig" };
+const KID = given?.kid ?? "test1";
+const jwk = { ...publicKey.export({ format: "jwk" }), kid: KID, alg: "EdDSA", use: "sig" };
 const files = { "klicenka.php": NEW, "klicenka-beta.php": BETA };
 const sha = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 const tracker = http.createServer((req, res) => {
   if (req.url === "/.well-known/jwks.json") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ keys: [jwk] }));
   if (req.url === "/api/klicenka/wordpress/manifest") {
     const p = Buffer.from(JSON.stringify({ iss: ISSUER, iat: Math.floor(Date.now() / 1000), version: "1.8.0", files: Object.entries(files).map(([name, c]) => ({ name, sha256: sha(c), size: Buffer.byteLength(c) })) })).toString("base64url");
-    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ payload: p, kid: "test1", sig: crypto.sign(null, Buffer.from(p), privateKey).toString("base64url") }));
+    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ payload: p, kid: KID, sig: crypto.sign(null, Buffer.from(p), privateKey).toString("base64url") }));
   }
   const m = req.url.match(/^\/api\/klicenka\/wordpress\/file\/(.+)$/);
   if (m && files[decodeURIComponent(m[1])]) return res.writeHead(200).end(files[decodeURIComponent(m[1])]);
@@ -57,7 +62,7 @@ function sign(claims = {}, { typ = "klicenka-beta+jwt", key = privateKey, ttl = 
   const now = Math.floor(Date.now() / 1000);
   const iat = claims.iat ?? now;
   const p = { iss: ISSUER, aud: AUD, sub: "klicenka-beta", jti: crypto.randomUUID(), iat, exp: iat + ttl, act: { sub: "u1", name: "Ondřej (test)", email: "o@example.test" }, scope: "test", ...claims };
-  const h = b64({ alg: "EdDSA", typ, kid: "test1" });
+  const h = b64({ alg: "EdDSA", typ, kid: KID });
   const pl = b64(p);
   return `${h}.${pl}.${crypto.sign(null, Buffer.from(`${h}.${pl}`), key).toString("base64url")}`;
 }
@@ -284,6 +289,16 @@ try {
   }
 
   check("web na konci běží", (await fetch(`${WP}/`)).status === 200);
+  // DUMP_DIR: HTML stránek s formuláři (podklad pro testy trackeru); HOLD: web nechat běžet (zkouška z trackeru).
+  if (process.env.DUMP_DIR) {
+    fs.writeFileSync(path.join(process.env.DUMP_DIR, "wpforms-kontakt.html"), await (await fetch(`${WP}/?page_id=${F.page}`)).text());
+    if (F.el) fs.writeFileSync(path.join(process.env.DUMP_DIR, "elementor-poptavka.html"), await (await fetch(`${WP}/?page_id=${F.el}`)).text());
+    fs.writeFileSync(path.join(process.env.DUMP_DIR, "forms.json"), JSON.stringify({ wp: WP, issuer: ISSUER, ...F }));
+  }
+  if (process.env.HOLD) {
+    console.log(`Web běží na ${WP} (Ctrl+C nebo SIGTERM ukončí).`);
+    await new Promise((r) => { process.on("SIGTERM", r); });
+  }
 } catch (e) {
   fail++; console.log(`\n✘ ${e.stack ?? e.message}`);
 } finally {
